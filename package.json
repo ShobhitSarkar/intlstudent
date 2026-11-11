@@ -11,8 +11,9 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
+    "make-admin": "node --disable-warning=ExperimentalWarning src/make-admin.js",
     "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
   },
   "dependencies": {
     "express": "^5.1.0"

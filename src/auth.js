@@ -66,7 +66,7 @@ function clearSessionCookie(res) {
 /** Express middleware: attaches req.user (or null) from the session cookie. */
 function loadUser(db) {
   const stmt = db.prepare(`
-    SELECT u.id, u.email, u.display_name, u.role, u.university_id, un.name AS university_name
+    SELECT u.id, u.email, u.display_name, u.role, u.rep_status, u.university_id, un.name AS university_name
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     LEFT JOIN universities un ON un.id = u.university_id
@@ -83,6 +83,18 @@ function loadUser(db) {
 function requireAuth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'You need to log in first.' });
   next();
+}
+
+/** A representative whose account an admin has approved, acting for their own university. */
+function isApprovedRepOf(user, universityId) {
+  return Boolean(
+    user && user.role === 'university_rep' && user.rep_status === 'approved' && user.university_id === universityId
+  );
+}
+
+/** Admins can moderate every board; approved representatives can moderate their own. */
+function canModerate(user, universityId) {
+  return Boolean(user && (user.role === 'admin' || isApprovedRepOf(user, universityId)));
 }
 
 /**
@@ -105,5 +117,7 @@ module.exports = {
   clearSessionCookie,
   loadUser,
   requireAuth,
+  isApprovedRepOf,
+  canModerate,
   emailMatchesDomain,
 };
