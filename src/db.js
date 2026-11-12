@@ -56,6 +56,22 @@ const REPORTS_DDL = (name) => `CREATE TABLE IF NOT EXISTS ${name} (
   UNIQUE (target_type, target_id, reporter_id)
 );`;
 
+/**
+ * Authorization tuples (Zanzibar style): object#relation@subject[#subject_relation].
+ * IDs are stored as text so any object type can be referenced. See src/authz.js.
+ */
+const RELATION_TUPLES_DDL = `CREATE TABLE IF NOT EXISTS relation_tuples (
+  object_type      TEXT NOT NULL,
+  object_id        TEXT NOT NULL,
+  relation         TEXT NOT NULL,
+  subject_type     TEXT NOT NULL,
+  subject_id       TEXT NOT NULL,
+  subject_relation TEXT NOT NULL DEFAULT '',
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (object_type, object_id, relation, subject_type, subject_id, subject_relation)
+);
+CREATE INDEX IF NOT EXISTS idx_tuples_subject ON relation_tuples(subject_type, subject_id, relation);`;
+
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 
@@ -130,6 +146,10 @@ ${ANSWERS_DDL}
 -- Open ones form the university's moderation queue.
 ${REPORTS_DDL('reports')}
 
+-- ------------------------------------------------------------------ authorization
+
+${RELATION_TUPLES_DDL}
+
 -- ------------------------------------------------------------------ networking
 
 -- One row per pair of people. Messaging is only possible once status = 'accepted'.
@@ -163,7 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_connection  ON messages(connection_id, c
 CREATE INDEX IF NOT EXISTS idx_targets_university   ON user_target_universities(university_id);
 `;
 
-const LATEST_VERSION = 2;
+const LATEST_VERSION = 3;
 
 /**
  * Open (and create if needed) the SQLite database.
@@ -226,6 +246,14 @@ function migrate(db) {
     } finally {
       db.exec('PRAGMA foreign_keys = ON');
     }
+    version = 2;
+  }
+
+  if (version < 3) {
+    // v3: authorization moves to relationship tuples; backfill them from the existing data.
+    db.exec(RELATION_TUPLES_DDL);
+    require('./authz').backfillTuples(db);
+    db.exec('PRAGMA user_version = 3');
   }
 }
 

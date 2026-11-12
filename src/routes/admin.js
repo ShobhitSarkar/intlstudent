@@ -2,12 +2,13 @@
 
 const express = require('express');
 const auth = require('../auth');
+const { tuple, tx, PLATFORM } = require('../authz');
 const { httpError, intParam } = require('../http');
 
-module.exports = function adminRoutes(db) {
+module.exports = function adminRoutes(db, ctx) {
   const router = express.Router();
   router.use(auth.requireAuth, (req, _res, next) => {
-    if (req.user.role !== 'admin') throw httpError(403, 'Admins only.');
+    if (!ctx.authz.check('platform', PLATFORM, 'admin', req.user.id)) throw httpError(403, 'Admins only.');
     next();
   });
 
@@ -25,22 +26,28 @@ module.exports = function adminRoutes(db) {
     res.json({ reps });
   });
 
+  const getRep = (id) => db.prepare("SELECT id, university_id FROM users WHERE id = ? AND role = 'university_rep'").get(intParam(id));
+
+  // Approving grants the representative relation on their university.
   router.post('/reps/:id/approve', (req, res) => {
-    const { changes } = db
-      .prepare("UPDATE users SET rep_status = 'approved' WHERE id = ? AND role = 'university_rep'")
-      .run(intParam(req.params.id));
-    if (!changes) throw httpError(404, 'Representative not found.');
+    const rep = getRep(req.params.id);
+    if (!rep) throw httpError(404, 'Representative not found.');
+    tx(db, () => {
+      db.prepare("UPDATE users SET rep_status = 'approved' WHERE id = ?").run(rep.id);
+      ctx.authz.write(tuple('university', rep.university_id, 'representative', 'user', rep.id));
+    });
     res.json({ ok: true });
   });
 
   // Rejecting (or revoking) turns the account into a regular prospective-student account.
   router.post('/reps/:id/reject', (req, res) => {
-    const { changes } = db
-      .prepare(
-        "UPDATE users SET role = 'prospective', rep_status = NULL, university_id = NULL WHERE id = ? AND role = 'university_rep'"
-      )
-      .run(intParam(req.params.id));
-    if (!changes) throw httpError(404, 'Representative not found.');
+    const rep = getRep(req.params.id);
+    if (!rep) throw httpError(404, 'Representative not found.');
+    tx(db, () => {
+      db.prepare("UPDATE users SET role = 'prospective', rep_status = NULL, university_id = NULL WHERE id = ?").run(rep.id);
+      ctx.authz.delete(tuple('university', rep.university_id, 'representative', 'user', rep.id));
+      ctx.authz.write(tuple('platform', PLATFORM, 'networker', 'user', rep.id));
+    });
     res.json({ ok: true });
   });
 

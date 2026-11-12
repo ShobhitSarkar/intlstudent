@@ -97,7 +97,7 @@ async function requireHuman(req, verifyHuman) {
   if (!Number.isFinite(startedAt) || Date.now() - startedAt < MIN_FORM_SECONDS * 1000) {
     throw httpError(400, 'That was quick! Please take a moment and try again.');
   }
-  let ok = false;
+  let ok;
   try {
     ok = await verifyHuman(b.humanToken, req.ip);
   } catch {

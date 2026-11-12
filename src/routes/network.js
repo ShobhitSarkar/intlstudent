@@ -2,10 +2,13 @@
 
 const express = require('express');
 const auth = require('../auth');
+const { tuple, tx, PLATFORM, directRelationSql } = require('../authz');
 const { httpError, str, optStr, optNum, intParam } = require('../http');
 
-// Only students take part in networking; representatives talk through the boards.
-const NETWORK_ROLES = ['prospective', 'student'];
+// Only students take part in networking (the platform#networker relation); representatives
+// talk through the boards.
+const NETWORKER = (userIdSql) => directRelationSql('platform', `'${PLATFORM}'`, 'networker', userIdSql);
+const PROFILE_ROLES = ['prospective', 'student'];
 const MAX_PENDING_OUTGOING = 25;
 const MAX_TARGET_UNIVERSITIES = 15;
 
@@ -77,8 +80,13 @@ module.exports = function networkRoutes(db, ctx) {
       ).run(...values, req.user.id);
       if (targetIds) {
         db.prepare('DELETE FROM user_target_universities WHERE user_id = ?').run(req.user.id);
+        db.prepare("DELETE FROM relation_tuples WHERE object_type = 'university' AND relation = 'considering' AND subject_type = 'user' AND subject_id = ?")
+          .run(String(req.user.id));
         const ins = db.prepare('INSERT INTO user_target_universities (user_id, university_id) VALUES (?, ?)');
-        for (const id of targetIds) ins.run(req.user.id, id);
+        for (const id of targetIds) {
+          ins.run(req.user.id, id);
+          ctx.authz.write(tuple('university', id, 'considering', 'user', req.user.id));
+        }
       }
       db.exec('COMMIT');
     } catch (err) {
@@ -101,8 +109,8 @@ module.exports = function networkRoutes(db, ctx) {
    */
   router.get('/people', (req, res) => {
     const me = db.prepare('SELECT id, home_country, university_id FROM users WHERE id = ?').get(req.user.id);
-    const where = [`u.role IN (${NETWORK_ROLES.map(() => '?').join(', ')})`, 'u.id <> ?'];
-    const params = [...NETWORK_ROLES, me.id];
+    const where = [NETWORKER('u.id'), 'u.id <> ?'];
+    const params = [me.id];
 
     const uniId = intParam(req.query.universityId);
     if (uniId) {
@@ -115,7 +123,7 @@ module.exports = function networkRoutes(db, ctx) {
       where.push('u.home_country = ? COLLATE NOCASE');
       params.push(req.query.homeCountry.trim());
     }
-    if (NETWORK_ROLES.includes(req.query.role)) {
+    if (PROFILE_ROLES.includes(req.query.role)) {
       where.push('u.role = ?');
       params.push(req.query.role);
     }
@@ -153,9 +161,9 @@ module.exports = function networkRoutes(db, ctx) {
     const row = db
       .prepare(
         `SELECT ${PROFILE_COLUMNS} FROM users u LEFT JOIN universities un ON un.id = u.university_id
-         WHERE u.id = ? AND u.role IN (${NETWORK_ROLES.map(() => '?').join(', ')})`
+         WHERE u.id = ? AND ${NETWORKER('u.id')}`
       )
-      .get(intParam(req.params.id), ...NETWORK_ROLES);
+      .get(intParam(req.params.id));
     if (!row) throw httpError(404, 'Person not found.');
     res.json({ person: profileCard(row, req.user.id) });
   });
@@ -163,7 +171,7 @@ module.exports = function networkRoutes(db, ctx) {
   // ---- connection requests
 
   function requireNetworkRole(req) {
-    if (!NETWORK_ROLES.includes(req.user.role)) {
+    if (!ctx.authz.check('platform', PLATFORM, 'networker', req.user.id)) {
       throw httpError(403, 'Networking is for prospective and current students.');
     }
   }
@@ -173,8 +181,8 @@ module.exports = function networkRoutes(db, ctx) {
     ctx.limiter.hit('connection', req.user.id);
     const otherId = intParam(req.body.userId);
     if (otherId === req.user.id) throw httpError(400, "You can't connect with yourself.");
-    const other = otherId && db.prepare('SELECT id, role FROM users WHERE id = ?').get(otherId);
-    if (!other || !NETWORK_ROLES.includes(other.role)) throw httpError(404, 'Person not found.');
+    const other = otherId && db.prepare('SELECT id FROM users WHERE id = ?').get(otherId);
+    if (!other || !ctx.authz.check('platform', PLATFORM, 'networker', other.id)) throw httpError(404, 'Person not found.');
 
     const existing = connectionWith(req.user.id, other.id);
     if (existing) {
@@ -193,10 +201,14 @@ module.exports = function networkRoutes(db, ctx) {
     }
 
     const note = optStr(req.body.note, { field: 'Note', max: 300 });
-    const { lastInsertRowid } = db
-      .prepare('INSERT INTO connections (requester_id, addressee_id, note) VALUES (?, ?, ?)')
-      .run(req.user.id, other.id, note);
-    res.status(201).json({ connection: { id: Number(lastInsertRowid), status: 'pending', direction: 'outgoing' } });
+    const id = tx(db, () => {
+      const newId = Number(
+        db.prepare('INSERT INTO connections (requester_id, addressee_id, note) VALUES (?, ?, ?)').run(req.user.id, other.id, note).lastInsertRowid
+      );
+      ctx.authz.write(tuple('connection', newId, 'requester', 'user', req.user.id), tuple('connection', newId, 'addressee', 'user', other.id));
+      return newId;
+    });
+    res.status(201).json({ connection: { id, status: 'pending', direction: 'outgoing' } });
   });
 
   router.get('/connections', (req, res) => {
@@ -237,7 +249,7 @@ module.exports = function networkRoutes(db, ctx) {
 
   function getConnection(req) {
     const c = db.prepare('SELECT * FROM connections WHERE id = ?').get(intParam(req.params.id));
-    if (!c || (c.requester_id !== req.user.id && c.addressee_id !== req.user.id)) {
+    if (!c || !ctx.authz.check('connection', c.id, 'can_view', req.user.id)) {
       throw httpError(404, 'Connection not found.');
     }
     return c;
@@ -245,10 +257,16 @@ module.exports = function networkRoutes(db, ctx) {
 
   router.post('/connections/:id/respond', (req, res) => {
     const c = getConnection(req);
-    if (c.addressee_id !== req.user.id) throw httpError(403, 'Only the person who received the request can respond.');
+    if (!ctx.authz.check('connection', c.id, 'can_respond', req.user.id)) throw httpError(403, 'Only the person who received the request can respond.');
     if (c.status !== 'pending') throw httpError(409, 'This request has already been answered.');
     const status = req.body.accept === true ? 'accepted' : 'declined';
-    db.prepare("UPDATE connections SET status = ?, responded_at = datetime('now') WHERE id = ?").run(status, c.id);
+    tx(db, () => {
+      db.prepare("UPDATE connections SET status = ?, responded_at = datetime('now') WHERE id = ?").run(status, c.id);
+      // Accepting makes both people members, which is what allows messaging.
+      if (status === 'accepted') {
+        ctx.authz.write(tuple('connection', c.id, 'member', 'user', c.requester_id), tuple('connection', c.id, 'member', 'user', c.addressee_id));
+      }
+    });
     res.json({ connection: { id: c.id, status } });
   });
 
@@ -257,7 +275,10 @@ module.exports = function networkRoutes(db, ctx) {
   router.delete('/connections/:id', (req, res) => {
     const c = getConnection(req);
     if (c.status === 'declined' && c.requester_id === req.user.id) throw httpError(404, 'Connection not found.');
-    db.prepare('DELETE FROM connections WHERE id = ?').run(c.id);
+    tx(db, () => {
+      db.prepare('DELETE FROM connections WHERE id = ?').run(c.id);
+      db.prepare("DELETE FROM relation_tuples WHERE object_type = 'connection' AND object_id = ?").run(String(c.id));
+    });
     res.json({ ok: true });
   });
 
@@ -265,7 +286,9 @@ module.exports = function networkRoutes(db, ctx) {
 
   function getAcceptedConnection(req) {
     const c = getConnection(req);
-    if (c.status !== 'accepted') throw httpError(403, 'You can message someone once they accept your connection request.');
+    if (!ctx.authz.check('connection', c.id, 'can_message', req.user.id)) {
+      throw httpError(403, 'You can message someone once they accept your connection request.');
+    }
     return c;
   }
 

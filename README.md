@@ -47,10 +47,24 @@ Then open http://localhost:3000. In development, sample universities and demo ac
 | `admissions@utoronto.ca` | University of Toronto representative     |
 | `admin@intlstudent.test` | Site admin (approves representatives)    |
 
-Run the API tests with:
+Run the API and authorization tests with:
 
 ```bash
 npm test
+```
+
+Other checks (all run in CI):
+
+```bash
+npm run lint
+```
+
+```bash
+npm run test:coverage
+```
+
+```bash
+npm run authz:check
 ```
 
 Run the browser tests (Playwright, drives the real app in Chromium; checks search, the question page, posting, messaging, and that mobile and dark mode fit the screen):
@@ -94,6 +108,25 @@ A university shows as **University active** when one of its verified representat
 
 Representatives need an admin's approval because students share the same email domain as staff. Only admins can change a university's verification email domain.
 
+**How permissions are enforced:** relationship-based authorization in the style of Google's Zanzibar. Every grant is a tuple such as `university:1#representative@user:7`, and permissions like `can_moderate` are computed from tuples by a schema in `src/authz.js`. Tuples are written in the same transaction as the data they describe, and `npm run authz:check` (also run in CI and the tests) fails if they drift. Full model: [docs/authorization.md](docs/authorization.md).
+
+## CI and merging
+
+GitHub Actions (`.github/workflows/`) runs on every pull request and on `main`:
+
+| Check | What it does |
+| --- | --- |
+| Lint | ESLint |
+| API tests | API and authorization tests, failing below 90% line, 75% branch or 80% function coverage |
+| Browser tests | Playwright against the real app in Chromium |
+| Authorization tuples | Builds a database through the migrations and seed, then checks every tuple matches the data |
+| Dependency audit | `npm audit` on production dependencies |
+| CodeQL | GitHub's security analysis (also weekly) |
+
+Dependabot opens weekly updates for npm packages and GitHub Actions.
+
+**To require these checks before merging into `main`:** in the GitHub repo, go to Settings → Rules → Rulesets → New ruleset → Import a ruleset, and choose `.github/rulesets/protect-main.json`. It requires a pull request with every check passing and up to date with `main`, resolved review threads and linear history, and blocks force-pushes and deleting `main`. It requires 0 approvals so a solo maintainer can still merge; raise `required_approving_review_count` once there's a team.
+
 ## Project layout
 
 ```
@@ -101,7 +134,8 @@ src/
   server.js            starts the app
   app.js               Express setup, security headers, error handling
   db.js                SQLite schema
-  auth.js              passwords (scrypt), sessions, permission checks
+  auth.js              passwords (scrypt), sessions
+  authz.js             authorization: tuple schema, check engine, drift detection
   http.js              input-validation helpers
   moderation.js        the automatic moderator
   protection.js        rate limits, human check, bot traps
@@ -112,8 +146,11 @@ src/
     boards.js          questions (members and guests), answers, reports, moderation
     network.js         profiles, directory, connection requests, messages
     admin.js           approving representatives
+docs/authorization.md  the authorization model
+.github/               CI workflows, CodeQL, Dependabot, branch ruleset
 public/                single-page frontend (plain JavaScript, no build step)
 test/api.test.js       API tests (node:test)
+test/authz.test.js     authorization model tests
 test/e2e/ui.test.js    browser tests (Playwright)
 ```
 

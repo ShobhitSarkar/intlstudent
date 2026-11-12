@@ -7,11 +7,14 @@ intlstudent helps prospective international students find universities, ask ques
 ```bash
 npm install
 npm start            # http://localhost:3000, with demo data
-npm test             # API tests (node:test, real in-memory SQLite, no mocks)
+npm run lint
+npm test             # API and authorization tests (node:test, real in-memory SQLite, no mocks)
+npm run test:coverage
 npm run test:e2e     # browser tests (Playwright); needs `npx playwright-core install chromium` once
+npm run authz:check  # stored authorization tuples match the data
 ```
 
-Run both test suites before pushing. Add a test with every behaviour change.
+CI runs all of these on every pull request, and they're required to merge. Add a test with every behaviour change.
 
 ## Rules that must hold
 
@@ -25,7 +28,10 @@ Never add an endpoint, API key, or flag that lets automated clients skip these. 
 
 **Privacy.** Student profiles, the network, and messages are for logged-in users only. Never expose email addresses in API responses other than the user's own. Don't send user data to third parties without the owner's agreement.
 
-**Who can do what.** Use `auth.canModerate()` and `auth.isApprovedRepOf()` for permissions. Only admins can change a university's verification email domain. Representatives act only on their own university.
+**Who can do what.** Authorization is Zanzibar-style relationship tuples (`src/authz.js`, explained in `docs/authorization.md`). Routes ask only for permissions: `ctx.authz.check(type, id, 'can_…', userId)`. Never check `users.role` to decide access.
+- To add a permission, add it to `MODEL` and to the DSL in `docs/authorization.md`, with tests in `test/authz.test.js`.
+- Any data change that grants or revokes access must write or delete its tuples **in the same `tx()`**, and `expectedTuples()` must derive the same tuples from the data, or `authz:check` fails.
+- Only admins can change a university's verification email domain. Representatives act only on their own university.
 
 ## Code conventions
 

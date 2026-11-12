@@ -4,6 +4,7 @@ const express = require('express');
 const auth = require('../auth');
 const { httpError, str, intParam } = require('../http');
 const { requireHuman } = require('../protection');
+const { tuple, tx, PLATFORM } = require('../authz');
 
 const SIGNUP_ROLES = ['prospective', 'student', 'university_rep'];
 
@@ -44,14 +45,21 @@ module.exports = function authRoutes(db, ctx) {
       throw httpError(409, 'An account with that email already exists.');
     }
 
-    const { lastInsertRowid } = db
-      .prepare(
-        'INSERT INTO users (email, display_name, password_hash, role, university_id, rep_status) VALUES (?, ?, ?, ?, ?, ?)'
-      )
-      .run(email, displayName, auth.hashPassword(password), role, universityId, repStatus);
-    const session = auth.createSession(db, Number(lastInsertRowid));
+    const passwordHash = auth.hashPassword(password);
+    const userId = tx(db, () => {
+      const id = Number(
+        db.prepare('INSERT INTO users (email, display_name, password_hash, role, university_id, rep_status) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(email, displayName, passwordHash, role, universityId, repStatus).lastInsertRowid
+      );
+      // Grants: students network; current students are verified by their email domain.
+      // Representatives get nothing until an admin approves them.
+      if (role !== 'university_rep') ctx.authz.write(tuple('platform', PLATFORM, 'networker', 'user', id));
+      if (role === 'student') ctx.authz.write(tuple('university', universityId, 'student', 'user', id));
+      return id;
+    });
+    const session = auth.createSession(db, userId);
     auth.setSessionCookie(res, session.token, session.expiresAt);
-    res.status(201).json({ user: currentUser(db, Number(lastInsertRowid)) });
+    res.status(201).json({ user: currentUser(db, ctx.authz, userId) });
   });
 
   router.post('/login', (req, res) => {
@@ -65,7 +73,7 @@ module.exports = function authRoutes(db, ctx) {
     }
     const session = auth.createSession(db, user.id);
     auth.setSessionCookie(res, session.token, session.expiresAt);
-    res.json({ user: currentUser(db, user.id) });
+    res.json({ user: currentUser(db, ctx.authz, user.id) });
   });
 
   router.post('/logout', (req, res) => {
@@ -75,14 +83,14 @@ module.exports = function authRoutes(db, ctx) {
   });
 
   router.get('/me', (req, res) => {
-    res.json({ user: req.user ? currentUser(db, req.user.id) : null });
+    res.json({ user: req.user ? currentUser(db, ctx.authz, req.user.id) : null });
   });
 
   return router;
 };
 
-/** The logged-in user, plus counts for the badges in the navigation bar. */
-function currentUser(db, id) {
+/** The logged-in user, what they're allowed to do, and counts for the navigation bar. */
+function currentUser(db, authz, id) {
   const user = db
     .prepare(
       `SELECT u.id, u.email, u.display_name, u.role, u.rep_status, u.university_id, un.name AS university_name
@@ -101,13 +109,13 @@ function currentUser(db, id) {
     )
     .get(id, id, id).n;
 
-  const moderates = user.role === 'admin' || (user.role === 'university_rep' && user.rep_status === 'approved');
-  user.open_reports = moderates
-    ? db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM reports WHERE status = 'open' ${user.role === 'admin' ? '' : 'AND university_id = ?'}`
-        )
-        .get(...(user.role === 'admin' ? [] : [user.university_id])).n
+  user.is_admin = authz.check('platform', PLATFORM, 'admin', id);
+  user.can_network = authz.check('platform', PLATFORM, 'networker', id);
+  // Universities whose boards this user moderates (every university, for admins).
+  user.moderates = authz.listObjects('university', 'can_moderate', id);
+  user.open_reports = user.moderates.length
+    ? db.prepare(`SELECT COUNT(*) AS n FROM reports WHERE status = 'open' AND university_id IN (${user.moderates.map(() => '?').join(',')})`)
+        .get(...user.moderates).n
     : 0;
   return user;
 }

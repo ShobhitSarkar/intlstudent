@@ -4,6 +4,7 @@ const path = require('node:path');
 const express = require('express');
 const auth = require('./auth');
 const { createRateLimiter, defaultHumanVerifier } = require('./protection');
+const { createAuthz } = require('./authz');
 
 /**
  * options.rateLimits   – overrides for the default limits, or false to turn limiting off (tests)
@@ -11,6 +12,7 @@ const { createRateLimiter, defaultHumanVerifier } = require('./protection');
  */
 function createApp(db, options = {}) {
   const ctx = {
+    authz: createAuthz(db),
     limiter: createRateLimiter(options.rateLimits),
     verifyHuman: options.verifyHuman || defaultHumanVerifier(),
     turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || null,
@@ -47,9 +49,9 @@ function createApp(db, options = {}) {
   app.get('/api/config', (_req, res) => res.json({ turnstileSiteKey: ctx.turnstileSiteKey }));
 
   app.use('/api/auth', require('./routes/auth')(db, ctx));
-  app.use('/api/universities', require('./routes/universities')(db));
+  app.use('/api/universities', require('./routes/universities')(db, ctx));
   app.use('/api', require('./routes/boards')(db, ctx));
-  app.use('/api/admin', require('./routes/admin')(db));
+  app.use('/api/admin', require('./routes/admin')(db, ctx));
   app.use('/api', require('./routes/network')(db, ctx));
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -60,7 +62,6 @@ function createApp(db, options = {}) {
   }
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
-  // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
     const status = err.status || err.statusCode || 500;
     if (status >= 500) console.error(err);

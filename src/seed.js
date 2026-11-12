@@ -135,6 +135,8 @@ function seedIfEmpty(db, { log = true } = {}) {
     );
 
     db.exec('COMMIT');
+    // Grant permissions for the demo data (normally written alongside each change by the routes).
+    require('./authz').backfillTuples(db);
     if (log) {
       console.log(`Seeded sample data. Demo accounts (password "${DEMO_PASSWORD}"):`);
       console.log('  priya@example.com       prospective student');

@@ -2,6 +2,7 @@
 
 const express = require('express');
 const auth = require('../auth');
+const { tuple, tx, PLATFORM, directRelationSql } = require('../authz');
 const { httpError, str, optStr, optNum, optUrl, intParam } = require('../http');
 
 /**
@@ -47,7 +48,7 @@ const ACTIVE_SQL = `EXISTS (
   JOIN questions q ON q.id = a.question_id
   JOIN users r ON r.id = a.user_id
   WHERE q.university_id = u.id AND a.hidden = 0 AND a.moderation_status = 'approved'
-    AND r.role = 'university_rep' AND r.rep_status = 'approved' AND r.university_id = u.id
+    AND ${directRelationSql('university', 'u.id', 'representative', 'r.id')}
     AND a.created_at >= datetime('now', '-30 days'))`;
 const ADMIN_ONLY_FIELDS = {
   email_domain: (v) => {
@@ -57,7 +58,8 @@ const ADMIN_ONLY_FIELDS = {
   },
 };
 
-module.exports = function universityRoutes(db) {
+module.exports = function universityRoutes(db, ctx) {
+  const can = (user, id, permission) => ctx.authz.check('university', id, permission, user?.id);
   const router = express.Router();
   const getUni = db.prepare('SELECT * FROM universities WHERE id = ?');
 
@@ -119,41 +121,44 @@ module.exports = function universityRoutes(db) {
     const stats = db
       .prepare(
         `SELECT
-           (SELECT COUNT(*) FROM users WHERE role = 'student' AND university_id = ?) AS current_students,
-           (SELECT COUNT(*) FROM user_target_universities WHERE university_id = ?) AS considering,
-           (SELECT COUNT(*) FROM users WHERE role = 'university_rep' AND rep_status = 'approved' AND university_id = ?) AS representatives`
+           (SELECT COUNT(*) FROM relation_tuples WHERE object_type = 'university' AND object_id = CAST(? AS TEXT) AND relation = 'student') AS current_students,
+           (SELECT COUNT(*) FROM relation_tuples WHERE object_type = 'university' AND object_id = CAST(? AS TEXT) AND relation = 'considering') AS considering,
+           (SELECT COUNT(*) FROM relation_tuples WHERE object_type = 'university' AND object_id = CAST(? AS TEXT) AND relation = 'representative') AS representatives`
       )
-      .get(uni.id, uni.id, uni.id);
+      .get(String(uni.id), String(uni.id), String(uni.id));
     res.json({
       university: { ...uni, ...stats },
-      can_edit: auth.canModerate(req.user, uni.id),
-      can_edit_email_domain: req.user?.role === 'admin',
+      can_edit: can(req.user, uni.id, 'can_edit_profile'),
+      can_edit_email_domain: can(req.user, uni.id, 'can_edit_email_domain'),
     });
   });
 
   // Admins add universities.
   router.post('/', auth.requireAuth, (req, res) => {
-    if (req.user.role !== 'admin') throw httpError(403, 'Only admins can add universities.');
+    if (!ctx.authz.check('platform', PLATFORM, 'admin', req.user.id)) throw httpError(403, 'Only admins can add universities.');
     const fields = { ...EDITABLE_FIELDS, ...ADMIN_ONLY_FIELDS };
     const values = {};
     for (const [col, parse] of Object.entries(fields)) values[col] = parse(req.body[col]);
     const cols = Object.keys(values);
-    const { lastInsertRowid } = db
-      .prepare(
-        `INSERT INTO universities (${cols.join(', ')}, updated_by) VALUES (${cols.map(() => '?').join(', ')}, ?)`
-      )
-      .run(...Object.values(values), req.user.id);
-    res.status(201).json({ university: getUni.get(lastInsertRowid) });
+    const id = tx(db, () => {
+      const newId = Number(
+        db.prepare(`INSERT INTO universities (${cols.join(', ')}, updated_by) VALUES (${cols.map(() => '?').join(', ')}, ?)`)
+          .run(...Object.values(values), req.user.id).lastInsertRowid
+      );
+      ctx.authz.write(tuple('university', newId, 'platform', 'platform', PLATFORM));
+      return newId;
+    });
+    res.status(201).json({ university: getUni.get(id) });
   });
 
   // Representatives keep their university's profile up to date. Only fields present in the body change.
   router.patch('/:id', auth.requireAuth, (req, res) => {
     const uni = getUni.get(intParam(req.params.id));
     if (!uni) throw httpError(404, 'University not found.');
-    if (!auth.canModerate(req.user, uni.id)) {
+    if (!can(req.user, uni.id, 'can_edit_profile')) {
       throw httpError(403, 'Only verified representatives of this university can edit its profile.');
     }
-    const allowed = req.user.role === 'admin' ? { ...EDITABLE_FIELDS, ...ADMIN_ONLY_FIELDS } : EDITABLE_FIELDS;
+    const allowed = can(req.user, uni.id, 'can_edit_email_domain') ? { ...EDITABLE_FIELDS, ...ADMIN_ONLY_FIELDS } : EDITABLE_FIELDS;
     const updates = {};
     for (const key of Object.keys(req.body || {})) {
       if (!(key in allowed)) {

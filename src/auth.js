@@ -85,18 +85,6 @@ function requireAuth(req, res, next) {
   next();
 }
 
-/** A representative whose account an admin has approved, acting for their own university. */
-function isApprovedRepOf(user, universityId) {
-  return Boolean(
-    user && user.role === 'university_rep' && user.rep_status === 'approved' && user.university_id === universityId
-  );
-}
-
-/** Admins can moderate every board; approved representatives can moderate their own. */
-function canModerate(user, universityId) {
-  return Boolean(user && (user.role === 'admin' || isApprovedRepOf(user, universityId)));
-}
-
 /**
  * True if `email` belongs to `domain` (exact domain or a subdomain of it),
  * e.g. "a@mail.utoronto.ca" belongs to "utoronto.ca".
@@ -117,7 +105,5 @@ module.exports = {
   clearSessionCookie,
   loadUser,
   requireAuth,
-  isApprovedRepOf,
-  canModerate,
   emailMatchesDomain,
 };

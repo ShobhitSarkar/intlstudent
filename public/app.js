@@ -72,7 +72,7 @@ function placeOf(u) {
   return [u.city, u.country].filter(Boolean).join(', ');
 }
 
-function when(sqlDate) {
+function ago(sqlDate) {
   const d = new Date(`${sqlDate.replace(' ', 'T')}Z`);
   const s = (Date.now() - d) / 1000;
   if (s < 60) return 'just now';
@@ -211,14 +211,13 @@ function renderNav() {
       count ? h('span', { class: 'count' }, count) : null);
   const items = [link('#/', 'Universities')];
   if (me) {
-    if (me.role === 'prospective' || me.role === 'student') {
+    // What to show comes from the user's permissions (computed from authorization tuples on the server).
+    if (me.can_network) {
       items.push(link('#/network', 'Network'));
       items.push(link('#/connections', 'Messages', (me.pending_requests || 0) + (me.unread_messages || 0)));
     }
-    if (me.role === 'university_rep' && me.rep_status === 'approved') {
-      items.push(link(`#/u/${me.university_id}/moderation`, 'Moderation', me.open_reports));
-    }
-    if (me.role === 'admin') items.push(link('#/admin', 'Admin'));
+    if (me.is_admin) items.push(link('#/admin', 'Admin', me.open_reports));
+    else if (me.moderates?.length) items.push(link(`#/u/${me.moderates[0]}/moderation`, 'Moderation', me.open_reports));
     items.push(link('#/profile', me.display_name));
     items.push(h('button', { type: 'button', onclick: async () => { await api('/auth/logout', { method: 'POST' }); await refreshMe(); go('#/'); } }, 'Log out'));
   } else {
@@ -336,7 +335,7 @@ async function pageUniversity(id, params) {
               h('a', { class: 'qrow', href: `#/q/${q.id}` },
                 h('span', { class: 'qtitle' }, q.title),
                 h('span', { class: `qcount${q.answer_count ? '' : ' zero'}` }, q.answer_count),
-                h('span', { class: 'qmeta' }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${when(q.created_at)}`,
+                h('span', { class: 'qmeta' }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${ago(q.created_at)}`,
                   q.has_official_answer ? h('span', { class: 'accent', style: { fontWeight: '600' } }, '  ·  Answered by the university') : null,
                   q.hidden ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Hidden') : null,
                   q.moderation_status === 'held' ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Waiting for review') : null,
@@ -451,10 +450,10 @@ async function pageQuestion(id) {
   const byline = (post) => {
     if (post.author_is_official) {
       return h('div', { class: 'byline' }, h('span', { class: 'name' }, q.university_name), icon(ICONS.verified),
-        h('span', {}, `${post.author_name}  ·  ${when(post.created_at)}`));
+        h('span', {}, `${post.author_name}  ·  ${ago(post.created_at)}`));
     }
     const label = post.author_is_current_student ? h('span', { class: 'student' }, 'Current student') : h('span', {}, post.author_badge);
-    return h('div', { class: 'byline' }, h('span', { class: 'name' }, post.author_name), label, h('span', {}, `·  ${when(post.created_at)}`));
+    return h('div', { class: 'byline' }, h('span', { class: 'name' }, post.author_name), label, h('span', {}, `·  ${ago(post.created_at)}`));
   };
 
   const answer = (a) => {
@@ -482,7 +481,7 @@ async function pageQuestion(id) {
     h('article', { class: `question${q.hidden || q.moderation_status !== 'approved' ? ' is-hidden' : ''}` },
       h('h1', { class: 'display-md' }, q.title),
       h('p', { class: 'lead pre' }, q.body),
-      h('p', { class: 'muted', style: { marginTop: '20px', fontSize: '15px' } }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${when(q.created_at)}`),
+      h('p', { class: 'muted', style: { marginTop: '20px', fontSize: '15px' } }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${ago(q.created_at)}`),
       hiddenNote(q),
       h('div', { class: 'answer-foot' },
         reviewButtons('question', q),
@@ -539,8 +538,8 @@ async function pageModeration(id, params) {
         ? reports.map((r) =>
             h('div', { class: 'mod-item' },
               h('p', { class: 'muted small' }, r.source === 'auto'
-                ? `${r.target_type === 'question' ? 'Question' : 'Answer'} held by the automatic check · ${when(r.created_at)}`
-                : `Reported ${r.target_type} · by ${r.reporter_name} · ${when(r.created_at)}${r.hidden ? ' · hidden' : ''}`),
+                ? `${r.target_type === 'question' ? 'Question' : 'Answer'} held by the automatic check · ${ago(r.created_at)}`
+                : `Reported ${r.target_type} · by ${r.reporter_name} · ${ago(r.created_at)}${r.hidden ? ' · hidden' : ''}`),
               h('p', {}, h('strong', {}, r.source === 'auto' ? 'Flagged for: ' : 'Reason: '), r.reason),
               h('div', { class: 'quote' },
                 r.question_title ? h('h3', { style: { fontSize: '20px', marginBottom: '6px' } }, r.question_title) : null,
@@ -682,12 +681,12 @@ async function pageConnections() {
               h('div', { style: { minWidth: 0 } },
                 h('h3', {}, c.person.display_name, c.unread ? h('span', { class: 'count' }, c.unread) : null),
                 h('p', { class: 'muted small' }, c.last_message ? c.last_message.slice(0, 120) : 'No messages yet. Say hello.'))),
-            h('span', { class: 'muted small' }, c.last_message_at ? when(c.last_message_at) : ''))))
+            h('span', { class: 'muted small' }, c.last_message_at ? ago(c.last_message_at) : ''))))
       : h('p', { class: 'empty' }, 'No connections yet. ', h('a', { class: 'linkline accent', href: '#/network' }, 'Find people to connect with')),
     outgoing.length ? h('h2', { class: 'eyebrow', style: { margin: '72px 0 8px' } }, 'Sent requests') : null,
     outgoing.map((c) =>
       h('div', { class: 'convo' },
-        h('span', {}, h('strong', {}, c.person.display_name), h('span', { class: 'muted small' }, `  ·  sent ${when(c.created_at)}`)),
+        h('span', {}, h('strong', {}, c.person.display_name), h('span', { class: 'muted small' }, `  ·  sent ${ago(c.created_at)}`)),
         h('button', { class: 'textbtn', type: 'button', onclick: () => withdraw(c.id) }, 'Withdraw')))
   ));
 }
@@ -698,7 +697,7 @@ async function pageChat(id) {
   const list = h('div', { class: 'chat', 'aria-live': 'polite' });
   const append = (msgs) => {
     for (const m of msgs) {
-      list.append(h('div', { class: `msg${m.sender_id === me.id ? ' mine' : ''}` }, h('div', { class: 'pre' }, m.body), h('div', { class: 'when' }, when(m.created_at))));
+      list.append(h('div', { class: `msg${m.sender_id === me.id ? ' mine' : ''}` }, h('div', { class: 'pre' }, m.body), h('div', { class: 'when' }, ago(m.created_at))));
       lastId = Math.max(lastId, m.id);
     }
     if (msgs.length) list.scrollTop = list.scrollHeight;
@@ -857,7 +856,7 @@ async function pageSignup() {
 /* ------------------------------------------------------------------ admin */
 
 async function pageAdmin() {
-  if (!me || me.role !== 'admin') return render(wrap(h('p', { class: 'error', style: { marginTop: '64px' } }, 'Admins only.')));
+  if (!me || !me.is_admin) return render(wrap(h('p', { class: 'error', style: { marginTop: '64px' } }, 'Admins only.')));
   const [{ reps }, { reports }] = await Promise.all([api('/admin/reps'), api('/reports')]);
   const act = async (path) => {
     await api(path, { method: 'POST' });
@@ -870,7 +869,7 @@ async function pageAdmin() {
     reps.length
       ? reps.map((r) =>
           h('div', { class: 'convo' },
-            h('div', {}, h('h3', {}, r.display_name), h('p', { class: 'muted small' }, `${r.email}  ·  ${r.university_name}  ·  signed up ${when(r.created_at)}`)),
+            h('div', {}, h('h3', {}, r.display_name), h('p', { class: 'muted small' }, `${r.email}  ·  ${r.university_name}  ·  signed up ${ago(r.created_at)}`)),
             h('div', { class: 'actions' },
               h('button', { class: 'textbtn', type: 'button', onclick: () => act(`/admin/reps/${r.id}/reject`) }, 'Reject'),
               h('button', { class: 'btn', type: 'button', onclick: () => act(`/admin/reps/${r.id}/approve`) }, 'Approve'))))
@@ -883,7 +882,7 @@ async function pageAdmin() {
             h('a', { class: 'convo', href: `#/u/${r.university_id}/moderation` },
               h('div', {}, h('h3', {}, r.question_title || (r.content || '').slice(0, 80)),
                 h('p', { class: 'muted small' }, `${r.university_name}  ·  ${r.source === 'auto' ? `held automatically: ${r.reason}` : `reported: ${r.reason}`}`)),
-              h('span', { class: 'muted small' }, when(r.created_at))))
+              h('span', { class: 'muted small' }, ago(r.created_at))))
         : h('p', { class: 'empty' }, 'Nothing to review.'))
   ));
 }

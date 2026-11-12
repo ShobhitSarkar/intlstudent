@@ -5,13 +5,19 @@ const auth = require('../auth');
 const { httpError, str, optStr, intParam } = require('../http');
 const { classify } = require('../moderation');
 const { requireHuman } = require('../protection');
+const { tuple, tx, PLATFORM, directRelationSql } = require('../authz');
 
-const AUTHOR_COLUMNS = (alias) => `
+/**
+ * Author columns. Whether the author is a verified representative or current student OF THIS
+ * BOARD's university comes from the authorization tuples, not from profile fields.
+ * `boardSql` is the SQL expression for the board's university id.
+ */
+const AUTHOR_COLUMNS = (alias, boardSql) => `
   ${alias === 'q' ? "COALESCE(usr.display_name, NULLIF(TRIM(q.guest_name), ''), 'Guest')" : 'usr.display_name'} AS author_name,
   usr.role          AS author_role,
-  usr.rep_status    AS author_rep_status,
-  usr.university_id AS author_university_id,
-  au.name           AS author_university_name`;
+  au.name           AS author_university_name,
+  ${directRelationSql('university', boardSql, 'representative', 'usr.id')} AS author_is_rep,
+  ${directRelationSql('university', boardSql, 'student', 'usr.id')} AS author_is_student`;
 
 const AUTHOR_JOINS = (alias) => `
   LEFT JOIN users usr ON usr.id = ${alias}.user_id
@@ -24,42 +30,41 @@ const PUBLIC = (alias) => `(${alias}.hidden = 0 AND ${alias}.moderation_status =
 const OFFICIAL_ANSWER = `EXISTS (
   SELECT 1 FROM answers a JOIN users ua ON ua.id = a.user_id
   WHERE a.question_id = q.id AND ${PUBLIC('a')}
-    AND ((ua.role = 'university_rep' AND ua.rep_status = 'approved' AND ua.university_id = q.university_id)
-         OR a.endorsed_by IS NOT NULL))`;
+    AND (${directRelationSql('university', 'q.university_id', 'representative', 'ua.id')} OR a.endorsed_by IS NOT NULL))`;
 
 /**
  * Describe who wrote a post relative to the university whose board it's on, so readers
  * can tell official answers and current students apart from everyone else.
  */
-function authorInfo(row, boardUniversityId) {
-  const same = row.author_university_id === boardUniversityId;
-  const official = row.author_role === 'university_rep' && row.author_rep_status === 'approved' && same;
-  const currentStudent = row.author_role === 'student' && same;
+function authorInfo(row) {
+  const official = Boolean(row.author_is_rep);
+  const currentStudent = Boolean(row.author_is_student);
   let badge;
   if (!row.author_role) badge = 'Guest';
   else if (official) badge = 'University representative';
   else if (currentStudent) badge = 'Current student';
-  else if (row.author_role === 'university_rep' && row.author_rep_status !== 'approved') badge = 'Unverified representative';
   else if (row.author_role === 'student' || row.author_role === 'university_rep') badge = `${row.author_university_name}`;
   else if (row.author_role === 'admin') badge = 'Moderator';
   else badge = 'Prospective student';
   return { author_badge: badge, author_is_official: official, author_is_current_student: currentStudent, author_is_guest: !row.author_role };
 }
 
-function present(row, boardUniversityId, { isMod }) {
+function present(row, { isMod }) {
   // eslint-disable-next-line no-unused-vars
-  const { author_rep_status, author_university_id, author_university_name, moderation_reason, ...rest } = row;
+  const { author_is_rep, author_is_student, author_university_name, moderation_reason, ...rest } = row;
   return {
     ...rest,
     hidden: Boolean(row.hidden),
     // Why the automatic moderator held a post is for moderators only.
     ...(isMod ? { moderation_reason } : {}),
-    ...authorInfo(row, boardUniversityId),
+    ...authorInfo(row),
   };
 }
 
 module.exports = function boardRoutes(db, ctx) {
   const router = express.Router();
+  const can = (user, type, id, permission) => ctx.authz.check(type, id, permission, user?.id);
+  const isAdmin = (user) => can(user, 'platform', PLATFORM, 'admin');
 
   /** Record that the automatic moderator held a post, so it shows in the queue. */
   function raiseAutoReport(type, targetId, universityId, reasons) {
@@ -73,7 +78,7 @@ module.exports = function boardRoutes(db, ctx) {
   router.get('/universities/:id/questions', (req, res) => {
     const uniId = intParam(req.params.id);
     if (!db.prepare('SELECT 1 FROM universities WHERE id = ?').get(uniId)) throw httpError(404, 'University not found.');
-    const isMod = auth.canModerate(req.user, uniId);
+    const isMod = can(req.user, 'university', uniId, 'can_moderate');
 
     const where = ['q.university_id = ?'];
     const params = [uniId];
@@ -96,7 +101,7 @@ module.exports = function boardRoutes(db, ctx) {
     const rows = db
       .prepare(
         `SELECT q.id, q.title, q.body, q.created_at, q.accepted_answer_id, q.hidden, q.moderation_status, q.moderation_reason,
-                ${AUTHOR_COLUMNS('q')},
+                ${AUTHOR_COLUMNS('q', 'q.university_id')},
                 (SELECT COUNT(*) FROM answers a WHERE a.question_id = q.id AND ${PUBLIC('a')}) AS answer_count,
                 ${OFFICIAL_ANSWER} AS has_official_answer
          FROM questions q
@@ -108,7 +113,7 @@ module.exports = function boardRoutes(db, ctx) {
       .all(...params);
 
     res.json({
-      questions: rows.map((r) => ({ ...present(r, uniId, { isMod }), has_official_answer: Boolean(r.has_official_answer) })),
+      questions: rows.map((r) => ({ ...present(r, { isMod }), has_official_answer: Boolean(r.has_official_answer) })),
       can_moderate: isMod,
     });
   });
@@ -135,14 +140,18 @@ module.exports = function boardRoutes(db, ctx) {
 
     const check = await classify({ text: `${guestName || ''}\n${title}\n${body}`, isGuest });
     const status = check.decision === 'approve' ? 'approved' : 'held';
-    const { lastInsertRowid } = db
-      .prepare(
-        `INSERT INTO questions (university_id, user_id, guest_name, title, body, moderation_status, moderation_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(uniId, req.user?.id ?? null, guestName, title, body, status, check.reasons.join('; ') || null);
-    const id = Number(lastInsertRowid);
-    if (status === 'held') raiseAutoReport('question', id, uniId, check.reasons);
+    const id = tx(db, () => {
+      const newId = Number(
+        db.prepare(
+          `INSERT INTO questions (university_id, user_id, guest_name, title, body, moderation_status, moderation_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).run(uniId, req.user?.id ?? null, guestName, title, body, status, check.reasons.join('; ') || null).lastInsertRowid
+      );
+      ctx.authz.write(tuple('question', newId, 'board', 'university', uniId));
+      if (req.user) ctx.authz.write(tuple('question', newId, 'author', 'user', req.user.id));
+      if (status === 'held') raiseAutoReport('question', newId, uniId, check.reasons);
+      return newId;
+    });
 
     if (isGuest && status === 'held') {
       // Guests have no profile to come back to, so they just get the outcome.
@@ -163,7 +172,7 @@ module.exports = function boardRoutes(db, ctx) {
     const q = db
       .prepare('SELECT id, hidden, moderation_status, user_id, university_id FROM questions WHERE id = ?')
       .get(intParam(req.params.id));
-    const canSee = q && (auth.canModerate(req.user, q.university_id) || q.user_id === req.user.id || (!q.hidden && q.moderation_status === 'approved'));
+    const canSee = q && ((!q.hidden && q.moderation_status === 'approved') || can(req.user, 'question', q.id, 'can_view_unpublished'));
     if (!canSee) throw httpError(404, 'Question not found.');
     if (q.hidden || q.moderation_status !== 'approved') throw httpError(403, "This question isn't open for answers right now.");
     ctx.limiter.hit('answer', req.user.id);
@@ -171,10 +180,14 @@ module.exports = function boardRoutes(db, ctx) {
 
     const check = await classify({ text: body, isGuest: false });
     const status = check.decision === 'approve' ? 'approved' : 'held';
-    const { lastInsertRowid } = db
-      .prepare('INSERT INTO answers (question_id, user_id, body, moderation_status, moderation_reason) VALUES (?, ?, ?, ?, ?)')
-      .run(q.id, req.user.id, body, status, check.reasons.join('; ') || null);
-    if (status === 'held') raiseAutoReport('answer', Number(lastInsertRowid), q.university_id, check.reasons);
+    tx(db, () => {
+      const answerId = Number(
+        db.prepare('INSERT INTO answers (question_id, user_id, body, moderation_status, moderation_reason) VALUES (?, ?, ?, ?, ?)')
+          .run(q.id, req.user.id, body, status, check.reasons.join('; ') || null).lastInsertRowid
+      );
+      ctx.authz.write(tuple('answer', answerId, 'question', 'question', q.id), tuple('answer', answerId, 'author', 'user', req.user.id));
+      if (status === 'held') raiseAutoReport('answer', answerId, q.university_id, check.reasons);
+    });
     res.status(201).json({ status, question: loadQuestion(q.id, req.user) });
   });
 
@@ -182,7 +195,7 @@ module.exports = function boardRoutes(db, ctx) {
   router.post('/questions/:id/accept', auth.requireAuth, (req, res) => {
     const q = db.prepare('SELECT id, user_id FROM questions WHERE id = ?').get(intParam(req.params.id));
     if (!q) throw httpError(404, 'Question not found.');
-    if (q.user_id === null || q.user_id !== req.user.id) throw httpError(403, 'Only the person who asked can accept an answer.');
+    if (!can(req.user, 'question', q.id, 'can_accept_answer')) throw httpError(403, 'Only the person who asked can accept an answer.');
     const answerId = req.body.answerId === null ? null : intParam(req.body.answerId);
     if (answerId !== null && !db.prepare(`SELECT 1 FROM answers a WHERE a.id = ? AND a.question_id = ? AND ${PUBLIC('a')}`).get(answerId, q.id)) {
       throw httpError(400, 'That answer does not belong to this question.');
@@ -211,7 +224,7 @@ module.exports = function boardRoutes(db, ctx) {
 
   function requireModerator(req, target) {
     if (!target) throw httpError(404, 'Post not found.');
-    if (!auth.canModerate(req.user, target.university_id)) {
+    if (!can(req.user, target.type, target.id, 'can_moderate')) {
       throw httpError(403, "Only this university's verified representatives can moderate its board.");
     }
   }
@@ -302,7 +315,7 @@ module.exports = function boardRoutes(db, ctx) {
   // Moderation queue for a university: open reports (from people and the automatic moderator).
   router.get('/universities/:id/reports', auth.requireAuth, (req, res) => {
     const uniId = intParam(req.params.id);
-    if (!auth.canModerate(req.user, uniId)) throw httpError(403, "Only this university's verified representatives can see reports.");
+    if (!can(req.user, 'university', uniId, 'can_moderate')) throw httpError(403, "Only this university's verified representatives can see reports.");
     const status = req.query.status === 'resolved' ? 'resolved' : 'open';
     const rows = db
       .prepare(`${REPORT_SELECT} WHERE r.university_id = ? AND r.status = ? ORDER BY r.created_at DESC, r.id DESC LIMIT 200`)
@@ -312,7 +325,7 @@ module.exports = function boardRoutes(db, ctx) {
 
   // Admins: the queue across every university (boards without a representative rely on this).
   router.get('/reports', auth.requireAuth, (req, res) => {
-    if (req.user.role !== 'admin') throw httpError(403, 'Admins only.');
+    if (!isAdmin(req.user)) throw httpError(403, 'Admins only.');
     const rows = db.prepare(`${REPORT_SELECT} WHERE r.status = 'open' ORDER BY r.created_at DESC, r.id DESC LIMIT 500`).all();
     res.json({ reports: rows.map(presentReport) });
   });
@@ -321,7 +334,7 @@ module.exports = function boardRoutes(db, ctx) {
   router.post('/reports/:id/resolve', auth.requireAuth, (req, res) => {
     const report = db.prepare('SELECT id, university_id FROM reports WHERE id = ?').get(intParam(req.params.id));
     if (!report) throw httpError(404, 'Report not found.');
-    if (!auth.canModerate(req.user, report.university_id)) throw httpError(403, 'Not allowed.');
+    if (!can(req.user, 'university', report.university_id, 'can_moderate')) throw httpError(403, 'Not allowed.');
     db.prepare("UPDATE reports SET status = 'resolved', resolved_by = ? WHERE id = ?").run(req.user.id, report.id);
     res.json({ ok: true });
   });
@@ -332,7 +345,7 @@ module.exports = function boardRoutes(db, ctx) {
     const q = db
       .prepare(
         `SELECT q.id, q.university_id, q.user_id, q.title, q.body, q.created_at, q.accepted_answer_id,
-                q.hidden, q.hidden_reason, q.moderation_status, q.moderation_reason, un.name AS university_name, ${AUTHOR_COLUMNS('q')}
+                q.hidden, q.hidden_reason, q.moderation_status, q.moderation_reason, un.name AS university_name, ${AUTHOR_COLUMNS('q', 'q.university_id')}
          FROM questions q
          JOIN universities un ON un.id = q.university_id
          ${AUTHOR_JOINS('q')}
@@ -340,27 +353,26 @@ module.exports = function boardRoutes(db, ctx) {
       )
       .get(id);
     if (!q) return null;
-    const isMod = auth.canModerate(viewer, q.university_id);
+    const isMod = can(viewer, 'university', q.university_id, 'can_moderate');
     const viewerId = viewer?.id ?? -1;
-    const isAuthor = q.user_id !== null && q.user_id === viewerId;
-    if ((q.hidden || q.moderation_status !== 'approved') && !isMod && !isAuthor) return null;
+    if ((q.hidden || q.moderation_status !== 'approved') && !can(viewer, 'question', q.id, 'can_view_unpublished')) return null;
 
     const answers = db
       .prepare(
         `SELECT a.id, a.body, a.created_at, a.user_id, a.hidden, a.hidden_reason, a.moderation_status, a.moderation_reason,
-                a.endorsed_by IS NOT NULL AS endorsed, ${AUTHOR_COLUMNS('a')}
+                a.endorsed_by IS NOT NULL AS endorsed, ${AUTHOR_COLUMNS('a', Number(q.university_id))}
          FROM answers a
          ${AUTHOR_JOINS('a')}
          WHERE a.question_id = ? ${isMod ? '' : `AND (${PUBLIC('a')} OR a.user_id = ?)`}
          ORDER BY a.created_at ASC, a.id ASC`
       )
       .all(...(isMod ? [id] : [id, viewerId]))
-      .map((a) => ({ ...present(a, q.university_id, { isMod }), endorsed: Boolean(a.endorsed) }));
+      .map((a) => ({ ...present(a, { isMod }), endorsed: Boolean(a.endorsed) }));
 
     // Official and confirmed answers first, then the accepted one, then oldest first.
     answers.sort((x, y) => rank(y, q) - rank(x, q));
 
-    return { ...present(q, q.university_id, { isMod }), answers, can_moderate: isMod };
+    return { ...present(q, { isMod }), answers, can_moderate: isMod };
   }
 
   function rank(a, q) {

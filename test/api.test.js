@@ -455,3 +455,9 @@ test('the automatic moderator: clean posts pass, risky ones are held', async () 
   assert.equal((await classify({ text: 'kys loser' })).decision, 'hold');
   assert.equal((await classify({ text: 'We write your SOP for you, cheap' })).decision, 'hold');
 });
+
+// Runs last: after every API call above, the stored authorization tuples must still match the data.
+test('authorization tuples stay in sync with the data', () => {
+  const { diffTuples } = require('../src/authz');
+  assert.deepEqual(diffTuples(db), { missing: [], extra: [] });
+});
