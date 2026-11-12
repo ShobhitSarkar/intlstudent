@@ -13,7 +13,7 @@ let db;
 before(async () => {
   db = openDb(':memory:');
   seedIfEmpty(db, { log: false });
-  server = createApp(db).listen(0);
+  server = createApp(db, { rateLimits: false }).listen(0);
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}/api`;
 });
@@ -41,6 +41,9 @@ function client() {
     login: (email) => call('POST', '/auth/login', { email, password: DEMO_PASSWORD }),
   };
 }
+
+/** What a real browser form sends: empty bot trap, a few seconds of typing, a human-check token. */
+const HUMAN = { website: '', startedAt: Date.now() - 10_000, humanToken: 'ok' };
 
 const uniId = (name) => db.prepare('SELECT id FROM universities WHERE name = ?').get(name).id;
 
@@ -81,20 +84,20 @@ test('student and rep signups require a university email; reps start unverified'
   const c = client();
   const toronto = uniId('University of Toronto');
   const bad = await c.post('/auth/signup', {
-    email: 'someone@gmail.com', password: 'longpassword', displayName: 'X', role: 'student', universityId: toronto,
+    email: 'someone@gmail.com', password: 'longpassword', displayName: 'X', role: 'student', universityId: toronto, ...HUMAN,
   });
   assert.equal(bad.status, 400);
   assert.match(bad.body.error, /utoronto\.ca/);
 
   const ok = await c.post('/auth/signup', {
-    email: 'newstudent@mail.utoronto.ca', password: 'longpassword', displayName: 'New', role: 'student', universityId: toronto,
+    email: 'newstudent@mail.utoronto.ca', password: 'longpassword', displayName: 'New', role: 'student', universityId: toronto, ...HUMAN,
   });
   assert.equal(ok.status, 201);
   assert.equal(ok.body.user.role, 'student');
 
   const rep = client();
   const r = await rep.post('/auth/signup', {
-    email: 'staff@utoronto.ca', password: 'longpassword', displayName: 'Staff', role: 'university_rep', universityId: toronto,
+    email: 'staff@utoronto.ca', password: 'longpassword', displayName: 'Staff', role: 'university_rep', universityId: toronto, ...HUMAN,
   });
   assert.equal(r.status, 201);
   assert.equal(r.body.user.rep_status, 'pending');
@@ -113,8 +116,8 @@ test('student and rep signups require a university email; reps start unverified'
 
 test('rejects duplicate emails, weak passwords and non-JSON posts', async () => {
   const c = client();
-  assert.equal((await c.post('/auth/signup', { email: 'priya@example.com', password: 'longpassword', displayName: 'P' })).status, 409);
-  assert.equal((await c.post('/auth/signup', { email: 'a@b.co', password: 'short', displayName: 'P' })).status, 400);
+  assert.equal((await c.post('/auth/signup', { email: 'priya@example.com', password: 'longpassword', displayName: 'P', ...HUMAN })).status, 409);
+  assert.equal((await c.post('/auth/signup', { email: 'a@b.co', password: 'short', displayName: 'P', ...HUMAN })).status, 400);
   const form = await fetch(`${base}/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'email=x',
   });
@@ -184,8 +187,18 @@ test('ask and answer; badges distinguish reps, current students and prospects', 
   assert.ok(official.body.questions.some((q) => q.id === qid));
 });
 
-test('must be logged in to post', async () => {
-  const res = await client().post(`/universities/${uniId('UNSW Sydney')}/questions`, { title: 'Hello there', body: 'x' });
+test('guests can ask but not answer', async () => {
+  const guest = client();
+  const unsw = uniId('UNSW Sydney');
+  const asked = await guest.post(`/universities/${unsw}/questions`, {
+    title: 'Is there a winter intake for engineering?', body: 'Thinking about July 2027.', guestName: 'Ana', ...HUMAN,
+  });
+  assert.equal(asked.status, 201);
+  assert.equal(asked.body.status, 'approved');
+  assert.equal(asked.body.question.author_name, 'Ana');
+  assert.equal(asked.body.question.author_badge, 'Guest');
+
+  const res = await guest.post(`/questions/${asked.body.question.id}/answers`, { body: 'I think so' });
   assert.equal(res.status, 401);
 });
 
@@ -338,4 +351,107 @@ test('representatives can set the brand colour and an https campus photo', async
   assert.equal(ok.status, 200);
   assert.equal(ok.body.university.brand_color, '#00204E');
   assert.equal(ok.body.university.photo_url, 'https://example.com/campus.jpg');
+});
+
+// ---------------------------------------------------------------- keeping the boards for people
+
+test('guest questions must pass the bot traps', async () => {
+  const unsw = uniId('UNSW Sydney');
+  const q = { title: 'What is campus housing like?', body: 'First year.' };
+  const c = client();
+  assert.equal((await c.post(`/universities/${unsw}/questions`, { ...q, ...HUMAN, website: 'http://spam.example' })).status, 400);
+  assert.equal((await c.post(`/universities/${unsw}/questions`, { ...q, ...HUMAN, startedAt: Date.now() })).status, 400);
+  assert.equal((await c.post(`/universities/${unsw}/questions`, q)).status, 400);
+});
+
+test('the automatic moderator holds flagged posts until a moderator reviews them', async () => {
+  const toronto = uniId('University of Toronto');
+  const guest = client();
+  const res = await guest.post(`/universities/${toronto}/questions`, {
+    title: 'Guaranteed admission for a fee', body: 'Our visa agent fee is low, whatsapp me for details', ...HUMAN,
+  });
+  assert.equal(res.status, 202);
+  assert.equal(res.body.status, 'held');
+
+  // Not public while held.
+  const list = await client().get(`/universities/${toronto}/questions`);
+  assert.ok(!list.body.questions.some((q) => q.title.startsWith('Guaranteed admission')));
+
+  // It waits in the moderation queue, marked as raised automatically.
+  const rep = client();
+  await rep.login('admissions@utoronto.ca');
+  const queue = await rep.get(`/universities/${toronto}/reports`);
+  const item = queue.body.reports.find((r) => r.question_title === 'Guaranteed admission for a fee');
+  assert.equal(item.source, 'auto');
+  assert.equal(item.moderation_status, 'held');
+  assert.match(item.reason, /scam/i);
+
+  // Rejected: stays hidden, and the queue item is resolved.
+  assert.equal((await rep.post(`/questions/${item.target_id}/review`, { approve: false })).body.status, 'rejected');
+  assert.equal((await client().get(`/questions/${item.target_id}`)).status, 404);
+  assert.ok(!(await rep.get(`/universities/${toronto}/reports`)).body.reports.some((r) => r.id === item.id));
+});
+
+test('members see their own held answer; approving publishes it', async () => {
+  const qid = db.prepare("SELECT id FROM questions WHERE title LIKE 'Is first-year residence%'").get().id;
+  const arjun = client();
+  await arjun.login('arjun@example.com');
+  const res = await arjun.post(`/questions/${qid}/answers`, { body: 'CHECK THIS OUT EVERYONE THIS IS IMPORTANT!!!' });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.status, 'held');
+  const mine = res.body.question.answers.find((a) => a.user_id && a.body.startsWith('CHECK THIS'));
+  assert.equal(mine.moderation_status, 'held');
+  assert.equal(mine.moderation_reason, undefined); // the reason is for moderators only
+
+  const publicView = await client().get(`/questions/${qid}`);
+  assert.ok(!publicView.body.question.answers.some((a) => a.id === mine.id));
+
+  const rep = client();
+  await rep.login('admissions@utoronto.ca');
+  const modView = await rep.get(`/questions/${qid}`);
+  assert.match(modView.body.question.answers.find((a) => a.id === mine.id).moderation_reason, /capital/);
+  await rep.post(`/answers/${mine.id}/review`, { approve: true });
+  assert.ok((await client().get(`/questions/${qid}`)).body.question.answers.some((a) => a.id === mine.id));
+
+  // Admins see the queue across all universities.
+  const admin = client();
+  await admin.login('admin@intlstudent.test');
+  assert.equal((await admin.get('/reports')).status, 200);
+  assert.equal((await arjun.get('/reports')).status, 403);
+});
+
+test('rate limits and the human check', async () => {
+  const strictDb = openDb(':memory:');
+  seedIfEmpty(strictDb, { log: false });
+  const strict = createApp(strictDb, {
+    rateLimits: { guestQuestion: [2, 60_000], login: [3, 60_000] },
+    verifyHuman: async (token) => token === 'ok',
+  }).listen(0);
+  await new Promise((r) => strict.once('listening', r));
+  const url = `http://127.0.0.1:${strict.address().port}/api`;
+  const post = (path, body) =>
+    fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    const ask = (token) => post('/universities/1/questions', { title: 'A normal question here', body: 'Details', ...HUMAN, humanToken: token });
+    assert.equal((await ask('wrong')).status, 400); // failed human check (still counts towards the limit)
+    assert.equal((await ask('ok')).status, 201);
+    const limited = await ask('ok');
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get('retry-after')) > 0);
+
+    for (let i = 0; i < 3; i++) await post('/auth/login', { email: 'priya@example.com', password: 'wrong-password' });
+    assert.equal((await post('/auth/login', { email: 'priya@example.com', password: DEMO_PASSWORD })).status, 429);
+  } finally {
+    strict.close();
+  }
+});
+
+test('the automatic moderator: clean posts pass, risky ones are held', async () => {
+  const { classify } = require('../src/moderation');
+  assert.equal((await classify({ text: 'How cold does Montreal get in January?' })).decision, 'approve');
+  assert.equal((await classify({ text: 'See https://example.edu/housing for details' })).decision, 'approve');
+  assert.equal((await classify({ text: 'See https://example.edu/housing', isGuest: true })).decision, 'hold');
+  assert.equal((await classify({ text: 'Email me at someone@example.com', isGuest: true })).decision, 'hold');
+  assert.equal((await classify({ text: 'kys loser' })).decision, 'hold');
+  assert.equal((await classify({ text: 'We write your SOP for you, cheap' })).decision, 'hold');
 });

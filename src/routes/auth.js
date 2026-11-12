@@ -3,13 +3,16 @@
 const express = require('express');
 const auth = require('../auth');
 const { httpError, str, intParam } = require('../http');
+const { requireHuman } = require('../protection');
 
 const SIGNUP_ROLES = ['prospective', 'student', 'university_rep'];
 
-module.exports = function authRoutes(db) {
+module.exports = function authRoutes(db, ctx) {
   const router = express.Router();
 
-  router.post('/signup', (req, res) => {
+  router.post('/signup', async (req, res) => {
+    ctx.limiter.hit('signup', req.ip);
+    await requireHuman(req, ctx.verifyHuman);
     const email = str(req.body.email, { field: 'Email', max: 254 }).toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError(400, 'Please enter a valid email address.');
     const password = str(req.body.password, { field: 'Password', min: 8, max: 200 });
@@ -54,6 +57,8 @@ module.exports = function authRoutes(db) {
   router.post('/login', (req, res) => {
     const email = str(req.body.email, { field: 'Email', max: 254 }).toLowerCase();
     const password = str(req.body.password, { field: 'Password', max: 200 });
+    ctx.limiter.hit('loginIp', req.ip);
+    ctx.limiter.hit('login', `${req.ip}:${email}`);
     const user = db.prepare('SELECT id, password_hash FROM users WHERE email = ?').get(email);
     if (!user || !auth.verifyPassword(password, user.password_hash)) {
       throw httpError(401, 'Incorrect email or password.');

@@ -242,3 +242,7 @@ legend { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 
 .checks label { display: flex; gap: 10px; align-items: center; font-size: 15px; min-height: 32px; }
 .footer { color: var(--muted); font-size: 13px; padding: 0 0 48px; }
 .nowrap { white-space: nowrap; }
+
+/* bot trap: off-screen for people, still in the form for bots */
+.trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.turnstile { min-height: 65px; }

@@ -3,17 +3,33 @@
 const path = require('node:path');
 const express = require('express');
 const auth = require('./auth');
+const { createRateLimiter, defaultHumanVerifier } = require('./protection');
 
-function createApp(db) {
+/**
+ * options.rateLimits   – overrides for the default limits, or false to turn limiting off (tests)
+ * options.verifyHuman  – async (token, ip) => boolean; defaults to Cloudflare Turnstile when configured
+ */
+function createApp(db, options = {}) {
+  const ctx = {
+    limiter: createRateLimiter(options.rateLimits),
+    verifyHuman: options.verifyHuman || defaultHumanVerifier(),
+    turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || null,
+  };
   const app = express();
   app.disable('x-powered-by');
+  // Behind a proxy or load balancer, set TRUST_PROXY (e.g. 1) so rate limits see the real client IP.
+  if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
   app.use(express.json({ limit: '100kb' }));
   app.use(auth.loadUser(db));
 
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https:; frame-ancestors 'none'");
+    const turnstile = ctx.turnstileSiteKey ? ' https://challenges.cloudflare.com' : '';
+    res.setHeader(
+      'Content-Security-Policy',
+      `default-src 'self'; img-src 'self' data: https:; script-src 'self'${turnstile}; frame-src 'self'${turnstile}; frame-ancestors 'none'`
+    );
     next();
   });
 
@@ -27,11 +43,14 @@ function createApp(db) {
     next();
   });
 
-  app.use('/api/auth', require('./routes/auth')(db));
+  // Public settings the browser needs (e.g. the human-check site key).
+  app.get('/api/config', (_req, res) => res.json({ turnstileSiteKey: ctx.turnstileSiteKey }));
+
+  app.use('/api/auth', require('./routes/auth')(db, ctx));
   app.use('/api/universities', require('./routes/universities')(db));
-  app.use('/api', require('./routes/boards')(db));
+  app.use('/api', require('./routes/boards')(db, ctx));
   app.use('/api/admin', require('./routes/admin')(db));
-  app.use('/api', require('./routes/network')(db));
+  app.use('/api', require('./routes/network')(db, ctx));
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
@@ -45,6 +64,7 @@ function createApp(db) {
   app.use((err, _req, res, _next) => {
     const status = err.status || err.statusCode || 500;
     if (status >= 500) console.error(err);
+    if (err.retryAfter) res.setHeader('Retry-After', String(err.retryAfter));
     res.status(status).json({ error: status >= 500 ? 'Something went wrong.' : err.message });
   });
 

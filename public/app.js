@@ -135,6 +135,39 @@ function wrap(...children) {
 const app = document.getElementById('app');
 let me = null;
 let pollTimer = null;
+let config = { turnstileSiteKey: null };
+
+/**
+ * Fields every guest post and signup form carries: a hidden trap field bots fill in, the time
+ * the form appeared, and (when configured) a Cloudflare Turnstile check.
+ * Returns { nodes, values() }.
+ */
+function humanCheck() {
+  const startedAt = Date.now();
+  const trap = h('input', { name: 'website', tabindex: '-1', autocomplete: 'off', 'aria-hidden': 'true' });
+  const trapWrap = h('div', { class: 'trap', 'aria-hidden': 'true' }, h('label', {}, 'Website', trap));
+  let token = '';
+  let box = null;
+  if (config.turnstileSiteKey) {
+    box = h('div', { class: 'turnstile' });
+    loadTurnstile().then(() => window.turnstile.render(box, { sitekey: config.turnstileSiteKey, callback: (t) => { token = t; } }));
+  }
+  return {
+    nodes: [trapWrap, box],
+    values: () => ({ website: trap.value, startedAt, humanToken: token }),
+  };
+}
+
+let turnstileLoading = null;
+function loadTurnstile() {
+  turnstileLoading ||= new Promise((resolve, reject) => {
+    const script = h('script', { src: 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit', async: true });
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.append(script);
+  });
+  return turnstileLoading;
+}
 
 function render(...nodes) {
   app.replaceChildren(...nodes.flat().filter(Boolean));
@@ -171,7 +204,7 @@ function renderNav() {
   const path = location.hash.split('?')[0] || '#/';
   const isActive = (href) =>
     href === '#/'
-      ? path === '#/' || path === '#' || path.startsWith('#/u/') || path.startsWith('#/q/')
+      ? path === '#/' || path === '#' || path.startsWith('#/q/') || (path.startsWith('#/u/') && !path.endsWith('/moderation'))
       : path.startsWith(href);
   const link = (href, label, count, cls) =>
     h('a', { href, class: [isActive(href) ? 'active' : '', cls || ''].join(' ').trim() || null }, label,
@@ -263,9 +296,7 @@ async function pageUniversity(id, params) {
           const { question } = await api(`/universities/${id}/questions`, { method: 'POST', body: data });
           go(`#/q/${question.id}`);
         })
-    : h('div', { class: 'ask stack' },
-        h('h3', { class: 'heading-sm' }, 'Ask something.'),
-        h('p', { class: 'muted' }, loginLink(), ' or ', h('a', { class: 'linkline accent', href: '#/signup' }, 'create a profile'), ' to ask the community.'));
+    : guestAskForm(id);
 
   const peopleCount = [
     u.current_students ? plural(u.current_students, 'current student') : null,
@@ -307,11 +338,38 @@ async function pageUniversity(id, params) {
                 h('span', { class: `qcount${q.answer_count ? '' : ' zero'}` }, q.answer_count),
                 h('span', { class: 'qmeta' }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${when(q.created_at)}`,
                   q.has_official_answer ? h('span', { class: 'accent', style: { fontWeight: '600' } }, '  ·  Answered by the university') : null,
-                  q.hidden ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Hidden') : null),
+                  q.hidden ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Hidden') : null,
+                  q.moderation_status === 'held' ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Waiting for review') : null,
+                  q.moderation_status === 'rejected' ? h('span', { style: { color: 'var(--danger)' } }, '  ·  Not published') : null),
                 h('span', { class: 'muted small', style: { textAlign: 'right' } }, q.answer_count === 1 ? 'answer' : 'answers'))))
           : h('p', { class: 'empty' }, filter === 'all' ? 'No questions yet. Be the first to ask.' : 'Nothing here yet.'),
         askForm)))
   );
+}
+
+/** Guests can ask (not answer). Their question is checked automatically before it appears. */
+function guestAskForm(id) {
+  const human = humanCheck();
+  const form = h('form', { class: 'ask stack' },
+    h('h3', { class: 'heading-sm' }, 'Ask something.'),
+    h('p', { class: 'muted' }, 'No profile needed to ask. To answer questions, ', loginLink('log in'), ' or ', h('a', { class: 'linkline accent', href: '#/signup' }, 'create a profile'), '.'),
+    h('label', {}, h('span', { class: 'sr-only' }, 'Your question'),
+      h('input', { name: 'title', required: true, minlength: 5, maxlength: 200, placeholder: 'Can international students work in first year?', style: { fontSize: '20px', fontWeight: '600', padding: '18px 22px', borderRadius: '20px' } })),
+    h('label', {}, h('span', { class: 'sr-only' }, 'Details'),
+      h('textarea', { name: 'body', required: true, maxlength: 5000, placeholder: 'Add details', style: { borderRadius: '20px', padding: '18px 22px' } })),
+    human.nodes,
+    h('div', { class: 'form-actions' },
+      h('label', { class: 'muted small', style: { display: 'flex', alignItems: 'center', gap: '10px' } }, 'Post as',
+        h('input', { name: 'guestName', maxlength: 40, placeholder: 'Guest', style: { width: '180px', padding: '10px 14px', borderRadius: '12px' } })),
+      h('button', { type: 'submit', class: 'btn' }, 'Post question →')));
+  return onSubmit(form, async (data) => {
+    const res = await api(`/universities/${id}/questions`, { method: 'POST', body: { ...data, ...human.values() } });
+    if (res.status === 'held') {
+      form.replaceChildren(h('h3', { class: 'heading-sm' }, 'Thanks.'), h('p', { class: 'lead' }, res.message));
+    } else {
+      go(`#/q/${res.question.id}`);
+    }
+  });
 }
 
 async function pageEditUniversity(id) {
@@ -374,7 +432,21 @@ async function pageQuestion(id) {
           const reason = prompt('Reason for hiding (shown to the author):');
           if (reason !== null) act(`/${type}s/${post.id}/hide`, { hidden: true, reason });
         } }, 'Hide');
-  const hiddenNote = (post) => post.hidden ? h('p', { class: 'hidden-note' }, `Hidden by a moderator${post.hidden_reason ? `: ${post.hidden_reason}` : ''}`) : null;
+  const hiddenNote = (post) => {
+    if (post.hidden) return h('p', { class: 'hidden-note' }, `Hidden by a moderator${post.hidden_reason ? `: ${post.hidden_reason}` : ''}`);
+    if (post.moderation_status === 'held') {
+      return h('p', { class: 'hidden-note' }, q.can_moderate
+        ? `Held by the automatic check${post.moderation_reason ? `: ${post.moderation_reason}` : ''}. Only moderators and the author can see it.`
+        : 'Waiting for a quick check by a moderator. Only you can see it for now.');
+    }
+    if (post.moderation_status === 'rejected') return h('p', { class: 'hidden-note' }, 'Not published by a moderator.');
+    return null;
+  };
+  const reviewButtons = (type, post) =>
+    q.can_moderate && post.moderation_status !== 'approved'
+      ? [h('button', { class: 'textbtn accent', type: 'button', onclick: () => act(`/${type}s/${post.id}/review`, { approve: true }) }, 'Approve'),
+         post.moderation_status === 'held' ? h('button', { class: 'textbtn', type: 'button', onclick: () => act(`/${type}s/${post.id}/review`, { approve: false }) }, 'Reject') : null]
+      : null;
 
   const byline = (post) => {
     if (post.author_is_official) {
@@ -391,7 +463,8 @@ async function pageQuestion(id) {
       accepted ? `★ ${q.author_name} found this most helpful` : null,
       a.endorsed && !a.author_is_official ? 'Confirmed by the university' : null,
     ].filter(Boolean);
-    return h('article', { class: `answer${a.author_is_official ? ' official' : ''}${a.hidden ? ' is-hidden' : ''}` },
+    const pending = a.hidden || a.moderation_status !== 'approved';
+    return h('article', { class: `answer${a.author_is_official ? ' official' : ''}${pending ? ' is-hidden' : ''}` },
       byline(a),
       hiddenNote(a),
       h('p', { class: 'body pre' }, a.body),
@@ -399,23 +472,25 @@ async function pageQuestion(id) {
         notes.length ? h('span', {}, notes.join('  ·  ')) : null,
         isAsker && !a.hidden ? h('button', { class: 'textbtn accent', type: 'button', onclick: () => act(`/questions/${q.id}/accept`, { answerId: accepted ? null : a.id }) }, accepted ? 'Unmark' : 'Mark as most helpful') : null,
         q.can_moderate && !a.author_is_official ? h('button', { class: 'textbtn', type: 'button', onclick: () => act(`/answers/${a.id}/endorse`, { endorsed: !a.endorsed }) }, a.endorsed ? 'Remove confirmation' : 'Confirm as accurate') : null,
+        reviewButtons('answer', a),
         q.can_moderate ? hideButton('answer', a) : null,
         me && me.id !== a.user_id && !q.can_moderate ? h('button', { class: 'textbtn', type: 'button', onclick: () => report('answer', a.id) }, 'Report') : null));
   };
 
   render(wrap(h('div', { class: 'thread' },
     h('a', { class: 'back', href: `#/u/${q.university_id}` }, `← ${q.university_name}`),
-    h('article', { class: `question${q.hidden ? ' is-hidden' : ''}` },
+    h('article', { class: `question${q.hidden || q.moderation_status !== 'approved' ? ' is-hidden' : ''}` },
       h('h1', { class: 'display-md' }, q.title),
       h('p', { class: 'lead pre' }, q.body),
       h('p', { class: 'muted', style: { marginTop: '20px', fontSize: '15px' } }, `${q.author_name}, ${q.author_badge.toLowerCase()}  ·  ${when(q.created_at)}`),
       hiddenNote(q),
       h('div', { class: 'answer-foot' },
+        reviewButtons('question', q),
         q.can_moderate ? hideButton('question', q) : null,
         me && me.id !== q.user_id && !q.can_moderate ? h('button', { class: 'textbtn', type: 'button', onclick: () => report('question', q.id) }, 'Report') : null)),
     h('h2', { class: 'eyebrow', style: { marginBottom: '8px' } }, plural(q.answers.length, 'answer')),
     q.answers.length ? q.answers.map(answer) : h('p', { class: 'empty', style: { borderTop: '1px solid var(--rule)' } }, 'No answers yet.'),
-    q.hidden ? null
+    q.hidden || q.moderation_status !== 'approved' ? null
       : me
         ? onSubmit(
             h('form', { class: 'reply stack' },
@@ -428,7 +503,8 @@ async function pageQuestion(id) {
               await api(`/questions/${id}/answers`, { method: 'POST', body: data });
               pageQuestion(id);
             })
-        : h('div', { class: 'reply stack' }, h('h3', { class: 'heading-sm' }, 'Your answer.'), h('p', { class: 'muted' }, loginLink(), ' to answer.'))
+        : h('div', { class: 'reply stack' }, h('h3', { class: 'heading-sm' }, 'Your answer.'),
+            h('p', { class: 'muted' }, 'Answers come from people with a profile, so readers know who is replying. ', loginLink(), ' or ', h('a', { class: 'linkline accent', href: '#/signup' }, 'create a profile'), '.'))
   )));
 }
 
@@ -454,7 +530,7 @@ async function pageModeration(id, params) {
     h('a', { class: 'back', href: `#/u/${id}` }, `← ${u.name}`),
     h('section', { class: 'hero', style: { paddingTop: '40px' } },
       h('h1', { class: 'display-md' }, 'Moderation'),
-      h('p', { class: 'lead', style: { marginTop: '24px', maxWidth: '640px' } }, 'Posts people have reported on your board. You can also hide posts and confirm accurate answers from any question page.')),
+      h('p', { class: 'lead', style: { marginTop: '24px', maxWidth: '640px' } }, 'Posts the automatic check held for review, and posts people reported. You can also hide posts and confirm accurate answers from any question page.')),
     h('nav', { class: 'tabs', 'aria-label': 'Report status' },
       h('a', { href: `#/u/${id}/moderation`, class: status === 'open' ? 'active' : null }, 'Open'),
       h('a', { href: `#/u/${id}/moderation?status=resolved`, class: status === 'resolved' ? 'active' : null }, 'Resolved')),
@@ -462,21 +538,27 @@ async function pageModeration(id, params) {
       reports.length
         ? reports.map((r) =>
             h('div', { class: 'mod-item' },
-              h('p', { class: 'muted small' }, `Reported ${r.target_type} · by ${r.reporter_name} · ${when(r.created_at)}${r.hidden ? ' · hidden' : ''}`),
-              h('p', {}, h('strong', {}, 'Reason: '), r.reason),
+              h('p', { class: 'muted small' }, r.source === 'auto'
+                ? `${r.target_type === 'question' ? 'Question' : 'Answer'} held by the automatic check · ${when(r.created_at)}`
+                : `Reported ${r.target_type} · by ${r.reporter_name} · ${when(r.created_at)}${r.hidden ? ' · hidden' : ''}`),
+              h('p', {}, h('strong', {}, r.source === 'auto' ? 'Flagged for: ' : 'Reason: '), r.reason),
               h('div', { class: 'quote' },
                 r.question_title ? h('h3', { style: { fontSize: '20px', marginBottom: '6px' } }, r.question_title) : null,
                 h('p', { class: 'pre' }, r.content),
                 h('p', { class: 'muted small', style: { marginTop: '8px' } }, `Written by ${r.author_name}`)),
               h('div', { class: 'actions' },
                 h('a', { class: 'linkline', href: `#/q/${r.question_id}` }, 'Open question'),
-                status === 'open' && !r.hidden
+                status === 'open' && r.moderation_status === 'held'
+                  ? [h('button', { class: 'btn', type: 'button', onclick: () => act(`/${r.target_type}s/${r.target_id}/review`, { approve: true }) }, 'Approve'),
+                     h('button', { class: 'btn light', type: 'button', onclick: () => act(`/${r.target_type}s/${r.target_id}/review`, { approve: false }) }, 'Reject')]
+                  : null,
+                status === 'open' && !r.hidden && r.moderation_status !== 'held'
                   ? h('button', { class: 'btn danger', type: 'button', onclick: () => {
                       const reason = prompt('Reason for hiding (shown to the author):', r.reason);
                       if (reason !== null) act(`/${r.target_type}s/${r.target_id}/hide`, { hidden: true, reason });
                     } }, 'Hide post')
                   : null,
-                status === 'open' ? h('button', { class: 'btn light', type: 'button', onclick: () => act(`/reports/${r.id}/resolve`) }, 'Dismiss report') : null)))
+                status === 'open' && r.moderation_status !== 'held' ? h('button', { class: 'btn light', type: 'button', onclick: () => act(`/reports/${r.id}/resolve`) }, 'Dismiss report') : null)))
         : h('p', { class: 'empty' }, status === 'open' ? 'Nothing to review.' : 'No resolved reports yet.'))
   ));
 }
@@ -736,6 +818,7 @@ async function pageSignup() {
     h('option', { value: '' }, 'Choose…'),
     universities.map((u) => h('option', { value: u.id }, u.name))));
   const hint = h('p', { class: 'muted small' });
+  const human = humanCheck();
   const form = h('form', { class: 'stack form-narrow' },
     field('I am a…', h('select', { name: 'role' },
       h('option', { value: 'prospective' }, 'Prospective student'),
@@ -746,6 +829,7 @@ async function pageSignup() {
     field('Display name', h('input', { name: 'displayName', required: true, maxlength: 60 })),
     field('Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email' })),
     field('Password (at least 8 characters)', h('input', { name: 'password', type: 'password', required: true, minlength: 8, autocomplete: 'new-password' })),
+    human.nodes,
     h('div', { class: 'form-actions' },
       h('a', { class: 'textbtn', href: '#/login' }, 'Already have a profile? Log in'),
       h('button', { type: 'submit', class: 'btn' }, 'Create profile')));
@@ -763,7 +847,7 @@ async function pageSignup() {
     h('section', { class: 'hero' }, h('h1', { class: 'display' }, 'Create your', h('br'), h('span', { class: 'accent' }, 'profile.'))),
     onSubmit(form, async (data) => {
       if (data.role === 'prospective') delete data.universityId;
-      await api('/auth/signup', { method: 'POST', body: data });
+      await api('/auth/signup', { method: 'POST', body: { ...data, ...human.values() } });
       await refreshMe();
       go('#/profile');
     })
@@ -774,7 +858,7 @@ async function pageSignup() {
 
 async function pageAdmin() {
   if (!me || me.role !== 'admin') return render(wrap(h('p', { class: 'error', style: { marginTop: '64px' } }, 'Admins only.')));
-  const { reps } = await api('/admin/reps');
+  const [{ reps }, { reports }] = await Promise.all([api('/admin/reps'), api('/reports')]);
   const act = async (path) => {
     await api(path, { method: 'POST' });
     pageAdmin();
@@ -790,7 +874,17 @@ async function pageAdmin() {
             h('div', { class: 'actions' },
               h('button', { class: 'textbtn', type: 'button', onclick: () => act(`/admin/reps/${r.id}/reject`) }, 'Reject'),
               h('button', { class: 'btn', type: 'button', onclick: () => act(`/admin/reps/${r.id}/approve`) }, 'Approve'))))
-      : h('p', { class: 'empty' }, 'No one is waiting.')
+      : h('p', { class: 'empty' }, 'No one is waiting.'),
+    h('h2', { class: 'heading-sm', style: { marginTop: '120px' } }, 'Moderation across all universities'),
+    h('p', { class: 'muted', style: { marginTop: '12px' } }, 'Includes boards that have no representative yet.'),
+    h('div', { style: { marginTop: '24px' } },
+      reports.length
+        ? reports.map((r) =>
+            h('a', { class: 'convo', href: `#/u/${r.university_id}/moderation` },
+              h('div', {}, h('h3', {}, r.question_title || (r.content || '').slice(0, 80)),
+                h('p', { class: 'muted small' }, `${r.university_name}  ·  ${r.source === 'auto' ? `held automatically: ${r.reason}` : `reported: ${r.reason}`}`)),
+              h('span', { class: 'muted small' }, when(r.created_at))))
+        : h('p', { class: 'empty' }, 'Nothing to review.'))
   ));
 }
 
@@ -834,4 +928,7 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
-refreshMe().catch(() => {}).finally(route);
+Promise.all([
+  refreshMe().catch(() => {}),
+  api('/config').then((c) => { config = c; }).catch(() => {}),
+]).finally(route);

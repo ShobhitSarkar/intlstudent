@@ -122,3 +122,35 @@ test('mobile and dark mode: pages fit the screen without sideways scrolling', as
   const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   assert.equal(bg, 'rgb(23, 17, 13)');
 });
+
+test('guests can ask without a profile; flagged questions wait for review', async (t) => {
+  const page = await newPage(t);
+  await page.goto(`${base}/#/u/3`);
+  await page.waitForSelector('form.ask');
+  await page.fill('input[name=title]', 'How early should I apply for a study permit?');
+  await page.fill('textarea[name=body]', 'Starting in September.');
+  await page.fill('input[name=guestName]', 'Lena');
+  await page.waitForTimeout(3200); // the form ignores submissions faster than a person could type
+  await page.click('form.ask button[type=submit]');
+  await page.waitForSelector('h1 >> text=study permit');
+  assert.match(await page.locator('.question').textContent(), /Lena, guest/);
+
+  await page.goto(`${base}/#/u/3`);
+  await page.waitForSelector('form.ask');
+  await page.fill('input[name=title]', 'Guaranteed admission, whatsapp me');
+  await page.fill('textarea[name=body]', 'Cheap visa agent fee');
+  await page.waitForTimeout(3200);
+  await page.click('form.ask button[type=submit]');
+  await page.waitForSelector('text=once a moderator has checked it');
+  // Guests are asked to make a profile to answer.
+  await page.goto(`${base}/#/q/1`);
+  await page.waitForSelector('.reply >> text=create a profile');
+});
+
+test('bot policy files are published', async () => {
+  const robots = await (await fetch(`${base}/robots.txt`)).text();
+  assert.match(robots, /agents\.md/);
+  const agents = await fetch(`${base}/agents.md`);
+  assert.equal(agents.status, 200);
+  assert.match(await agents.text(), /must not do/);
+});

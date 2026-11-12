@@ -11,8 +11,14 @@ Helping international students choose a university and connect with the people w
   - **Current student**: someone signed up with that university's email domain.
   - **Prospective student**: everyone else.
 
-  The person who asked can mark the answer that helped them most.
+  The person who asked can mark the answer that helped them most. **Guests can ask without a profile, but only people with a profile can answer.**
 - **Network**: students fill in a profile (home country and city, program, intake, and the universities they're considering). The directory suggests people who are considering the same universities or come from the same country, plus current students at those universities. You send a **connection request** with an optional note, and **direct messages** open only after the other person accepts.
+
+**Keeping it human and safe**
+- **Automatic moderator, always on:** every question and answer is checked before it appears (`src/moderation.js`). Clean posts publish straight away. Posts that look like harassment, scams aimed at students (paid "guaranteed admission", visa-agent fees, essay writing), spam, or (from guests) links and contact details are **held** for a person to approve or reject. It's rule-based for now and built so a trained classifier can be added alongside it.
+- **Proof of a person:** guest questions and new profiles pass a human check (Cloudflare Turnstile, when configured) and bot traps (a hidden field and a minimum time to fill in the form).
+- **Rate limits** on logging in, signing up, guest and member posts, reports, messages and connection requests.
+- **Bot policy:** `/robots.txt` and `/agents.md` tell crawlers and AI agents they may read public pages but must never post, sign up or message. The checks above enforce it. `AGENTS.md` in the repo gives the same rule to coding agents working on this code.
 
 **For universities**
 - **Moderation**: verified representatives can hide posts on their own board (the author still sees their post along with the reason), endorse accurate answers from students, and work through a queue of posts users have reported.
@@ -57,7 +63,17 @@ npx playwright-core install chromium
 npm run test:e2e
 ```
 
-Settings, all optional: `PORT` (default 3000), `DB_FILE` (default `data/intlstudent.db`), and `SEED_DEMO=false` to skip the demo data. Demo data is never created when `NODE_ENV=production`.
+Settings:
+
+| Variable | What it does |
+| --- | --- |
+| `PORT` | Port to listen on (default 3000) |
+| `DB_FILE` | Database file (default `data/intlstudent.db`) |
+| `SEED_DEMO=false` | Skip the demo data (never created when `NODE_ENV=production`) |
+| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile keys for the human check. Without them the check is skipped in development and **guest questions and signups are refused in production** |
+| `TRUST_PROXY` | Set (e.g. `1`) when running behind a proxy or load balancer, so rate limits see each visitor's real IP |
+
+Existing databases are upgraded automatically on startup.
 
 > **The tuition figures in the sample data are rough, illustrative numbers.** Replace them with real figures (or have each university's representatives update them) before anyone relies on them.
 
@@ -87,11 +103,13 @@ src/
   db.js                SQLite schema
   auth.js              passwords (scrypt), sessions, permission checks
   http.js              input-validation helpers
+  moderation.js        the automatic moderator
+  protection.js        rate limits, human check, bot traps
   seed.js              sample data
   routes/
     auth.js            sign up, log in, current user
     universities.js    search, detail, profile editing
-    boards.js          questions, answers, reports, moderation
+    boards.js          questions (members and guests), answers, reports, moderation
     network.js         profiles, directory, connection requests, messages
     admin.js           approving representatives
 public/                single-page frontend (plain JavaScript, no build step)
@@ -101,9 +119,11 @@ test/e2e/ui.test.js    browser tests (Playwright)
 
 ## Before a real launch
 
+- **Backfill university data.** Collect and import real data (tuition, contacts, photos, colours) for every university, with a source and date for each figure. This is its own workstream, still to be planned.
 - **Confirm email ownership.** Signups currently check the email *domain* but don't send a confirmation link, so someone could type an address that isn't theirs. Add email verification before trusting the "Current student" badge.
 - **Real university data**, with a source and a date for every tuition figure.
-- **Rate limiting** on login, signup, posting and connection requests (outgoing requests are already capped at 25 pending).
+- **Shared rate-limit storage** (e.g. Redis) once there's more than one server; limits are counted in memory today.
+- **A trained classifier** alongside the rule-based moderator, and a maintained list of abusive terms.
 - **Blocking and reporting people** in the network, not just posts.
 - **Real-time messaging** with WebSockets or server-sent events. The chat currently checks for new messages every 5 seconds.
 - **Notifications by email** for answers, connection requests and messages.

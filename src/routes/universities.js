@@ -46,7 +46,7 @@ const ACTIVE_SQL = `EXISTS (
   SELECT 1 FROM answers a
   JOIN questions q ON q.id = a.question_id
   JOIN users r ON r.id = a.user_id
-  WHERE q.university_id = u.id AND a.hidden = 0
+  WHERE q.university_id = u.id AND a.hidden = 0 AND a.moderation_status = 'approved'
     AND r.role = 'university_rep' AND r.rep_status = 'approved' AND r.university_id = u.id
     AND a.created_at >= datetime('now', '-30 days'))`;
 const ADMIN_ONLY_FIELDS = {
@@ -94,7 +94,7 @@ module.exports = function universityRoutes(db) {
       .prepare(
         `SELECT u.id, u.name, u.city, u.state_province, u.country, u.website, u.contact_email, u.contact_phone,
                 u.intl_tuition_amount, u.tuition_currency, u.intl_tuition_usd, u.brand_color, u.photo_url,
-                (SELECT COUNT(*) FROM questions q WHERE q.university_id = u.id AND q.hidden = 0) AS question_count,
+                (SELECT COUNT(*) FROM questions q WHERE q.university_id = u.id AND q.hidden = 0 AND q.moderation_status = 'approved') AS question_count,
                 ${ACTIVE_SQL} AS university_active
          FROM universities u
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}

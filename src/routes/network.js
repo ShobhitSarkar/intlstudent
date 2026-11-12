@@ -9,7 +9,7 @@ const NETWORK_ROLES = ['prospective', 'student'];
 const MAX_PENDING_OUTGOING = 25;
 const MAX_TARGET_UNIVERSITIES = 15;
 
-module.exports = function networkRoutes(db) {
+module.exports = function networkRoutes(db, ctx) {
   const router = express.Router();
   router.use(['/me', '/people', '/connections'], auth.requireAuth);
 
@@ -170,6 +170,7 @@ module.exports = function networkRoutes(db) {
 
   router.post('/connections', (req, res) => {
     requireNetworkRole(req);
+    ctx.limiter.hit('connection', req.user.id);
     const otherId = intParam(req.body.userId);
     if (otherId === req.user.id) throw httpError(400, "You can't connect with yourself.");
     const other = otherId && db.prepare('SELECT id, role FROM users WHERE id = ?').get(otherId);
@@ -290,6 +291,7 @@ module.exports = function networkRoutes(db) {
 
   router.post('/connections/:id/messages', (req, res) => {
     const c = getAcceptedConnection(req);
+    ctx.limiter.hit('message', req.user.id);
     const body = str(req.body.body, { field: 'Message', max: 2000 });
     const { lastInsertRowid } = db
       .prepare('INSERT INTO messages (connection_id, sender_id, body) VALUES (?, ?, ?)')

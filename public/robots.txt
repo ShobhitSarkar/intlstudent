@@ -1,0 +1,7 @@
+# intlstudent
+# Crawlers may read public pages. Automated agents must not post, sign up or message.
+# Full policy for bots and AI agents: /agents.md
+
+User-agent: *
+Allow: /
+Disallow: /api/
