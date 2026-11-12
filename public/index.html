@@ -3,18 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>intlstudent — find your university, ask real students</title>
+  <meta name="color-scheme" content="light dark">
+  <title>intlstudent: find your university, ask the people who go there</title>
+  <link rel="stylesheet" href="/fonts/inter/index.css">
+  <link rel="stylesheet" href="/fonts/inter-tight/index.css">
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a href="#/" class="brand">intl<span>student</span></a>
-    <nav id="nav"></nav>
-  </header>
+  <div class="wrap">
+    <header class="topbar">
+      <a href="#/" class="logo">intlstudent<span>.</span></a>
+      <nav id="nav" aria-label="Main"></nav>
+    </header>
+  </div>
   <main id="app" tabindex="-1"></main>
-  <footer class="footer">
-    Tuition figures in the sample data are approximate. Always confirm with the university.
-  </footer>
+  <div class="wrap">
+    <footer class="footer">Tuition figures in the sample data are approximate. Always confirm with the university.</footer>
+  </div>
 </body>
 </html>

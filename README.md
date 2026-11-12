@@ -41,15 +41,31 @@ Then open http://localhost:3000. In development, sample universities and demo ac
 | `admissions@utoronto.ca` | University of Toronto representative     |
 | `admin@intlstudent.test` | Site admin (approves representatives)    |
 
-Run the tests with:
+Run the API tests with:
 
 ```bash
 npm test
 ```
 
+Run the browser tests (Playwright, drives the real app in Chromium; checks search, the question page, posting, messaging, and that mobile and dark mode fit the screen):
+
+```bash
+npx playwright-core install chromium
+```
+
+```bash
+npm run test:e2e
+```
+
 Settings, all optional: `PORT` (default 3000), `DB_FILE` (default `data/intlstudent.db`), and `SEED_DEMO=false` to skip the demo data. Demo data is never created when `NODE_ENV=production`.
 
 > **The tuition figures in the sample data are rough, illustrative numbers.** Replace them with real figures (or have each university's representatives update them) before anyone relies on them.
+
+## Design
+
+Minimal and bold: large tight type (Inter Tight for headings, Inter for text), brown ink with a burnt-orange accent, rounded shapes and generous space, with no boxed cards or badges. Light and dark mode follow the visitor's system setting, and every page works at phone width. Each university page uses that university's colour and campus photo (`brand_color` and `photo_url`, editable by its representatives); until a photo is added, the colour fills the space. Fonts are served from the app itself, so pages make no requests to font services.
+
+A university shows as **University active** when one of its verified representatives has answered on its board in the last 30 days.
 
 ## How accounts and trust work
 
@@ -80,6 +96,7 @@ src/
     admin.js           approving representatives
 public/                single-page frontend (plain JavaScript, no build step)
 test/api.test.js       API tests (node:test)
+test/e2e/ui.test.js    browser tests (Playwright)
 ```
 
 ## Before a real launch

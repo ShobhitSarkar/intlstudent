@@ -26,7 +26,29 @@ const EDITABLE_FIELDS = {
   },
   intl_tuition_usd: (v) => optNum(v, { field: 'Tuition in USD' }),
   tuition_notes: (v) => optStr(v, { field: 'Tuition notes', max: 500 }),
+  brand_color: (v) => {
+    const s = optStr(v, { field: 'Brand colour', max: 7 });
+    if (s !== null && !/^#[0-9a-f]{6}$/i.test(s)) throw httpError(400, 'Brand colour must be a hex colour such as #1E3765.');
+    return s && s.toUpperCase();
+  },
+  photo_url: (v) => {
+    const s = optUrl(v, { field: 'Campus photo URL' });
+    if (s !== null && !s.startsWith('https://')) throw httpError(400, 'Campus photo URL must start with https://');
+    return s;
+  },
 };
+
+/**
+ * "University active": a verified representative of the university answered on its board
+ * in the last 30 days. Shown instead of answer counts so students know the university responds.
+ */
+const ACTIVE_SQL = `EXISTS (
+  SELECT 1 FROM answers a
+  JOIN questions q ON q.id = a.question_id
+  JOIN users r ON r.id = a.user_id
+  WHERE q.university_id = u.id AND a.hidden = 0
+    AND r.role = 'university_rep' AND r.rep_status = 'approved' AND r.university_id = u.id
+    AND a.created_at >= datetime('now', '-30 days'))`;
 const ADMIN_ONLY_FIELDS = {
   email_domain: (v) => {
     const s = optStr(v, { field: 'Email domain', max: 100 });
@@ -71,15 +93,16 @@ module.exports = function universityRoutes(db) {
     const rows = db
       .prepare(
         `SELECT u.id, u.name, u.city, u.state_province, u.country, u.website, u.contact_email, u.contact_phone,
-                u.intl_tuition_amount, u.tuition_currency, u.intl_tuition_usd,
-                (SELECT COUNT(*) FROM questions q WHERE q.university_id = u.id AND q.hidden = 0) AS question_count
+                u.intl_tuition_amount, u.tuition_currency, u.intl_tuition_usd, u.brand_color, u.photo_url,
+                (SELECT COUNT(*) FROM questions q WHERE q.university_id = u.id AND q.hidden = 0) AS question_count,
+                ${ACTIVE_SQL} AS university_active
          FROM universities u
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY ${orderBy}
          LIMIT 200`
       )
       .all(...params);
-    res.json({ universities: rows });
+    res.json({ universities: rows.map((r) => ({ ...r, university_active: Boolean(r.university_active) })) });
   });
 
   router.get('/countries', (_req, res) => {
@@ -87,9 +110,12 @@ module.exports = function universityRoutes(db) {
     res.json({ countries: rows });
   });
 
+  const activeStmt = db.prepare(`SELECT ${ACTIVE_SQL} AS active FROM universities u WHERE u.id = ?`);
+
   router.get('/:id', (req, res) => {
     const uni = getUni.get(intParam(req.params.id));
     if (!uni) throw httpError(404, 'University not found.');
+    uni.university_active = Boolean(activeStmt.get(uni.id).active);
     const stats = db
       .prepare(
         `SELECT

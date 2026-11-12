@@ -314,3 +314,28 @@ test('profile updates, including universities being considered', async () => {
   assert.deepEqual(body.profile.targets.map((t) => t.id).sort(), ids.sort());
   assert.equal((await chen.put('/me/profile', { displayName: 'C', targetUniversityIds: [99999] })).status, 400);
 });
+
+// ---------------------------------------------------------------- branding and activity
+
+test('universities carry brand colour, photo and a "University active" flag', async () => {
+  const { body } = await client().get('/universities');
+  const toronto = body.universities.find((u) => u.name === 'University of Toronto');
+  const iowa = body.universities.find((u) => u.name === 'Iowa State University');
+  assert.equal(toronto.brand_color, '#1E3765');
+  // The seeded Toronto representative answered recently; nobody official has answered at Iowa State.
+  assert.equal(toronto.university_active, true);
+  assert.equal(iowa.university_active, false);
+  assert.equal((await client().get(`/universities/${toronto.id}`)).body.university.university_active, true);
+});
+
+test('representatives can set the brand colour and an https campus photo', async () => {
+  const rep = client();
+  await rep.login('admissions@utoronto.ca');
+  const toronto = uniId('University of Toronto');
+  assert.equal((await rep.patch(`/universities/${toronto}`, { brand_color: 'blue' })).status, 400);
+  assert.equal((await rep.patch(`/universities/${toronto}`, { photo_url: 'http://example.com/a.jpg' })).status, 400);
+  const ok = await rep.patch(`/universities/${toronto}`, { brand_color: '#00204e', photo_url: 'https://example.com/campus.jpg' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.university.brand_color, '#00204E');
+  assert.equal(ok.body.university.photo_url, 'https://example.com/campus.jpg');
+});

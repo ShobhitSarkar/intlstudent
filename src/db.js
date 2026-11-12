@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS universities (
   -- Same figure converted to USD so universities can be filtered and sorted together.
   intl_tuition_usd    INTEGER,
   tuition_notes       TEXT,
+  -- Branding: the university's colour (hex) and a campus photo URL for its page and card.
+  brand_color         TEXT,
+  photo_url           TEXT,
   created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_by          INTEGER REFERENCES users(id) ON DELETE SET NULL
@@ -148,7 +151,22 @@ function openDb(file = process.env.DB_FILE || path.join(__dirname, '..', 'data',
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Columns added after the first release; added to existing databases on startup. */
+const ADDED_COLUMNS = {
+  universities: { brand_color: 'TEXT', photo_url: 'TEXT' },
+};
+
+function migrate(db) {
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+    for (const [name, type] of Object.entries(columns)) {
+      if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
 }
 
 module.exports = { openDb };

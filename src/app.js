@@ -13,7 +13,7 @@ function createApp(db) {
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https:; frame-ancestors 'none'");
     next();
   });
 
@@ -35,6 +35,10 @@ function createApp(db) {
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
+  // Self-hosted fonts (no requests to third-party font servers).
+  for (const font of ['inter', 'inter-tight']) {
+    app.use(`/fonts/${font}`, express.static(path.join(__dirname, '..', 'node_modules', '@fontsource-variable', font)));
+  }
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   // eslint-disable-next-line no-unused-vars

@@ -11,18 +11,18 @@
 const { hashPassword } = require('./auth');
 
 const UNIVERSITIES = [
-  ['University of Toronto', 'Toronto', 'Ontario', 'Canada', 'https://www.utoronto.ca', 'utoronto.ca', 62000, 'CAD', 45500],
-  ['University of British Columbia', 'Vancouver', 'British Columbia', 'Canada', 'https://www.ubc.ca', 'ubc.ca', 50000, 'CAD', 36700],
-  ['McGill University', 'Montreal', 'Quebec', 'Canada', 'https://www.mcgill.ca', 'mcgill.ca', 50000, 'CAD', 36700],
-  ['Iowa State University', 'Ames', 'Iowa', 'United States', 'https://www.iastate.edu', 'iastate.edu', 28000, 'USD', 28000],
-  ['University of Michigan', 'Ann Arbor', 'Michigan', 'United States', 'https://umich.edu', 'umich.edu', 60000, 'USD', 60000],
-  ['Arizona State University', 'Tempe', 'Arizona', 'United States', 'https://www.asu.edu', 'asu.edu', 34000, 'USD', 34000],
-  ['University of Manchester', 'Manchester', 'England', 'United Kingdom', 'https://www.manchester.ac.uk', 'manchester.ac.uk', 28000, 'GBP', 35500],
-  ['University of Edinburgh', 'Edinburgh', 'Scotland', 'United Kingdom', 'https://www.ed.ac.uk', 'ed.ac.uk', 29000, 'GBP', 36800],
-  ['University of Melbourne', 'Melbourne', 'Victoria', 'Australia', 'https://www.unimelb.edu.au', 'unimelb.edu.au', 48000, 'AUD', 31500],
-  ['UNSW Sydney', 'Sydney', 'New South Wales', 'Australia', 'https://www.unsw.edu.au', 'unsw.edu.au', 52000, 'AUD', 34000],
-  ['Technical University of Munich', 'Munich', 'Bavaria', 'Germany', 'https://www.tum.de', 'tum.de', 6000, 'EUR', 6500],
-  ['National University of Singapore', 'Singapore', null, 'Singapore', 'https://nus.edu.sg', 'nus.edu.sg', 38000, 'SGD', 28500],
+  ['University of Toronto', 'Toronto', 'Ontario', 'Canada', 'https://www.utoronto.ca', 'utoronto.ca', 62000, 'CAD', 45500, '#1E3765'],
+  ['University of British Columbia', 'Vancouver', 'British Columbia', 'Canada', 'https://www.ubc.ca', 'ubc.ca', 50000, 'CAD', 36700, '#002145'],
+  ['McGill University', 'Montreal', 'Quebec', 'Canada', 'https://www.mcgill.ca', 'mcgill.ca', 50000, 'CAD', 36700, '#ED1B2F'],
+  ['Iowa State University', 'Ames', 'Iowa', 'United States', 'https://www.iastate.edu', 'iastate.edu', 28000, 'USD', 28000, '#C8102E'],
+  ['University of Michigan', 'Ann Arbor', 'Michigan', 'United States', 'https://umich.edu', 'umich.edu', 60000, 'USD', 60000, '#00274C'],
+  ['Arizona State University', 'Tempe', 'Arizona', 'United States', 'https://www.asu.edu', 'asu.edu', 34000, 'USD', 34000, '#8C1D40'],
+  ['University of Manchester', 'Manchester', 'England', 'United Kingdom', 'https://www.manchester.ac.uk', 'manchester.ac.uk', 28000, 'GBP', 35500, '#660099'],
+  ['University of Edinburgh', 'Edinburgh', 'Scotland', 'United Kingdom', 'https://www.ed.ac.uk', 'ed.ac.uk', 29000, 'GBP', 36800, '#041E42'],
+  ['University of Melbourne', 'Melbourne', 'Victoria', 'Australia', 'https://www.unimelb.edu.au', 'unimelb.edu.au', 48000, 'AUD', 31500, '#094183'],
+  ['UNSW Sydney', 'Sydney', 'New South Wales', 'Australia', 'https://www.unsw.edu.au', 'unsw.edu.au', 52000, 'AUD', 34000, '#1A1A1A'],
+  ['Technical University of Munich', 'Munich', 'Bavaria', 'Germany', 'https://www.tum.de', 'tum.de', 6000, 'EUR', 6500, '#3070B3'],
+  ['National University of Singapore', 'Singapore', null, 'Singapore', 'https://nus.edu.sg', 'nus.edu.sg', 38000, 'SGD', 28500, '#003D7C'],
 ];
 
 const DEMO_PASSWORD = 'password123';
@@ -34,13 +34,13 @@ function seedIfEmpty(db, { log = true } = {}) {
   try {
     const insUni = db.prepare(
       `INSERT INTO universities (name, city, state_province, country, website, email_domain,
-         intl_tuition_amount, tuition_currency, intl_tuition_usd, contact_email, description, tuition_notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         intl_tuition_amount, tuition_currency, intl_tuition_usd, brand_color, contact_email, description, tuition_notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const uniIds = {};
-    for (const [name, city, region, country, website, domain, amount, currency, usd] of UNIVERSITIES) {
+    for (const [name, city, region, country, website, domain, amount, currency, usd, color] of UNIVERSITIES) {
       const { lastInsertRowid } = insUni.run(
-        name, city, region, country, website, domain, amount, currency, usd,
+        name, city, region, country, website, domain, amount, currency, usd, color,
         `international@${domain}`,
         `${name} in ${city}, ${country}. (Sample description — the university's representatives can replace this.)`,
         'Sample figure: approximate yearly undergraduate tuition for international students. Check the university website.'
